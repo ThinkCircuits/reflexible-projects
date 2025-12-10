@@ -9,7 +9,7 @@ $fn = 128;
 part = "assembly"; // [assembly:Assembly View, enclosure:Enclosure Only, lid:Lid Only, shelf:Shelf Only]
 
 /* [Assembly View Options] */
-show_enclosure = true;
+show_enclosure = false;
 show_lid = true;
 show_shelf = true;
 show_boards = true;  // Shadow models for visualization
@@ -36,7 +36,7 @@ shelf_post_front_y = 10;    // Distance from front inner wall
 shelf_post_back_y = 25;     // Distance from back inner wall (avoids capacitor)
 shelf_standoff_h = 3;       // Height of board standoffs on shelf
 shelf_clearance = 2;        // Clearance around shelf edges
-shelf_corner_notch = 10;    // Size of corner notches to clear lid gussets
+shelf_corner_notch = 8;     // Size of corner notches to clear lid gussets
 
 /* [Board Dimensions - SparkFun Qwiic Twist] */
 // RGB Rotary Encoder Breakout (DEV-15083)
@@ -279,6 +279,40 @@ module enclosure_body() {
         translate([oled_cutout_x, oled_cutout_y, (wall_thickness + enclosure_h)/2])
             cube([oled_display_w + 2*display_margin, oled_display_l + 2*display_margin, enclosure_h - wall_thickness + 10], center=true);
 
+        // Engraved text on front face (Z=0, XY plane), at bottom edge
+        translate([0, enclosure_l/2 - 6, -0.5])
+            mirror([0, 1, 0])
+                linear_extrude(1.5)
+                    text("Pico Plant Waterer", size=4, halign="center", valign="center", font="Liberation Sans:style=Bold");
+        translate([0, enclosure_l/2 - 12, -0.5])
+            mirror([0, 1, 0])
+                linear_extrude(1.5)
+                    text("Mirror AI", size=3.5, halign="center", valign="center", font="Liberation Sans:style=Bold");
+
+        // Leaf icon (right side) - simple almond leaf with stem
+        translate([18, enclosure_l/2 - 12, -0.5])
+            mirror([0, 1, 0])
+                linear_extrude(1.5)
+                    rotate([0, 0, -45]) {
+                        // Leaf body - intersection of two offset circles
+                        intersection() {
+                            translate([-2, 3]) circle(r=4);
+                            translate([2, 3]) circle(r=4);
+                        }
+                        // Stem
+                        translate([0, -1]) square([0.6, 1.5], center=true);
+                    }
+
+        // Water droplet icon (left side) - proper teardrop
+        translate([-18, enclosure_l/2 - 9, -0.5])
+            mirror([0, 1, 0])
+                linear_extrude(1.5) {
+                    // Bottom round part
+                    translate([0, 3]) circle(r=3);
+                    // Top pointed part
+                    polygon(points=[[-2.6, 4.5], [2.6, 4.5], [0, 10]]);
+                }
+
         // Relay wiring notch - rectangular slot from top of oval to top of wall
         relay_hole_w = 2.25 * 3;  // oval width
         relay_hole_h = 2.25;      // oval height
@@ -387,29 +421,37 @@ module enclosure_body() {
 // ============================================================
 
 module enclosure_lid() {
+    lip_thickness = 1.5;  // Thin alignment lip
+
     difference() {
         union() {
+            // Main lid plate
             rounded_box(enclosure_w, enclosure_l, wall_thickness, corner_radius);
+
+            // Thin perimeter lip for alignment/sealing
             translate([0, 0, -lid_overlap + wall_thickness])
-                rounded_box(
-                    enclosure_w - 2*wall_thickness - lid_clearance,
-                    enclosure_l - 2*wall_thickness - lid_clearance,
-                    lid_overlap,
-                    max(1, corner_radius - wall_thickness)
-                );
+                difference() {
+                    rounded_box(
+                        enclosure_w - 2*wall_thickness - lid_clearance,
+                        enclosure_l - 2*wall_thickness - lid_clearance,
+                        lid_overlap,
+                        max(1, corner_radius - wall_thickness)
+                    );
+                    // Hollow out the inside, leaving just a perimeter
+                    translate([0, 0, -1])
+                        rounded_box(
+                            enclosure_w - 2*wall_thickness - lid_clearance - 2*lip_thickness,
+                            enclosure_l - 2*wall_thickness - lid_clearance - 2*lip_thickness,
+                            lid_overlap + 2,
+                            max(0.5, corner_radius - wall_thickness - lip_thickness)
+                        );
+                }
         }
 
+        // Screw holes - clearance only, no countersink (printable)
         lid_screw_positions()
-            translate([0, 0, -lid_overlap]) {
-                cylinder(d=m3_hole_dia, h=wall_thickness + lid_overlap + 1);
-                translate([0, 0, lid_overlap])
-                    cylinder(d=m3_head_dia, h=wall_thickness + 1);
-            }
-
-        // Ventilation slots
-        for (i = [-1:1])
-            translate([i * 12, 0, -1])
-                cube([4, enclosure_l - 25, wall_thickness + 2], center=true);
+            translate([0, 0, -lid_overlap - 1])
+                cylinder(d=m3_hole_dia, h=wall_thickness + lid_overlap + 2);
     }
 
     // Relay wiring tab - fills rectangular slot, semicircle cutout at bottom
@@ -463,12 +505,12 @@ module component_shelf() {
                         cylinder(d=5, h=shelf_standoff_h);
         }
 
-        // Mounting screw holes (countersunk)
+        // Mounting screw holes with countersink on top
         shelf_screw_positions() {
             translate([0, 0, -1])
                 cylinder(d=m3_hole_dia, h=shelf_thickness + 2);
             translate([0, 0, shelf_thickness - 1.5])
-                cylinder(d=m3_head_dia, h=2);
+                cylinder(d1=m3_hole_dia, d2=m3_head_dia, h=1.5);  // Conical countersink
         }
 
         // Pico screw holes
@@ -484,15 +526,20 @@ module component_shelf() {
                     cylinder(d=1.8, h=shelf_thickness + shelf_standoff_h + 2);
 
         // Cable routing cutout
-        translate([0, 0, -1])
-            cube([15, 30, shelf_thickness + 2], center=true);
+        translate([-7.5, -15, -1])
+            cube([15, 30, shelf_thickness + 2]);
 
         // Corner notches to clear lid gussets
         for (sx = [-1, 1])
-            for (sy = [-1, 1])
-                translate([sx * (shelf_w/2 - shelf_corner_notch/2 + 1),
-                           sy * (shelf_l/2 - shelf_corner_notch/2 + 1), -1])
-                    cube([shelf_corner_notch + 2, shelf_corner_notch + 2, shelf_thickness + 2], center=true);
+            for (sy = [-1, 1]) {
+                corner_x = sx * shelf_w/2;
+                corner_y = sy * shelf_l/2;
+                // Position cube so it cuts the corner, with 1mm overhang for clean render
+                cube_x = (sx > 0) ? corner_x - shelf_corner_notch : corner_x - 1;
+                cube_y = (sy > 0) ? corner_y - shelf_corner_notch : corner_y - 1;
+                translate([cube_x, cube_y, -1])
+                    cube([shelf_corner_notch + 1, shelf_corner_notch + 1, shelf_thickness + 2]);
+            }
     }
 }
 
@@ -551,7 +598,10 @@ module enclosure_for_print() {
 }
 
 module lid_for_print() {
-    enclosure_lid();
+    // Flip so lip faces up, flat surface on build plate
+    translate([0, 0, wall_thickness])
+        rotate([180, 0, 0])
+            enclosure_lid();
 }
 
 module shelf_for_print() {
