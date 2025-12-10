@@ -1,1 +1,15 @@
+# Generated files
 *.stl
+*.gcode
+
+# OpenSCAD backup files
+*.scad~
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
