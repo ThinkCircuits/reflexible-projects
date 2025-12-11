@@ -33,12 +33,12 @@ pico_usb_h = 3;
 pico_hole_dia = 2.1;        // mounting hole diameter
 pico_hole_from_end = 4.8;   // from short edge to hole center
 pico_hole_from_side = 2.0;  // from long edge to hole center
-pico_hole_spacing_x = pico_pcb_w - 2*pico_hole_from_side;
-pico_hole_spacing_y = pico_pcb_l - 2*pico_hole_from_end;
+pico_hole_spacing_x = 11.34;
+pico_hole_spacing_y = 46.9;
 
 /* [USB Port Cutout] */
 usb_plug_w = 10;            // USB plug width (rounded oval)
-usb_plug_h = 6;             // USB plug height
+usb_plug_h = 7.5;           // USB plug height
 
 /* [Component Dimensions - SparkFun BNO086 IMU] */
 bno_pcb_w = 25.4;           // mm (1 inch)
@@ -60,12 +60,12 @@ inner_clearance = 1.0;      // clearance around components
 
 /* [Screw Parameters] */
 m3_hole_dia = 3.4;          // Clearance hole for M3
-m3_tap_dia = 2.5;           // Hole for self-tapping M3 into plastic
+m3_tap_dia = 3.0;           // Hole for self-tapping M3 into plastic (accounts for ~0.5mm shrink)
 m3_head_dia = 6;            // M3 screw head diameter
 screw_boss_dia = 7;
 
-m2_tap_dia = 1.8;           // M2 tap hole for Pico
-m2_screw_post_dia = 5.0;    // diameter of screw post
+m2_tap_dia = 2.0;           // M2 tap hole for Pico (accounts for ~0.5mm shrink)
+m2_screw_post_dia = 5.0;    // diameter of screw post for M2
 
 // ============================================================
 // CALCULATED DIMENSIONS
@@ -90,9 +90,9 @@ enclosure_h = interior_h + floor_thickness;
 pico_x = 0;  // centered
 pico_y = -interior_l/2 + pico_pcb_l/2 + 5;  // USB end near front wall, +4mm back
 
-// BNO086 positioned to the side of the Pico
+// BNO086 positioned to the side of the Pico, moved back to clear corner screw post
 bno_x = pico_x + pico_pcb_w/2 + bno_pcb_w/2 + 2;  // to the right of Pico with 2mm gap
-bno_y = pico_y - pico_pcb_l/2 + bno_pcb_l/2;  // aligned with front of Pico
+bno_y = pico_y - pico_pcb_l/2 + bno_pcb_l/2 + 8;  // moved 8mm towards center to clear corner
 
 // NeoPixel mounted against underside of lid (LEDs facing up through holes)
 neopixel_z = enclosure_h - neopixel_pcb_h;  // top of NeoPixel touches lid
@@ -239,7 +239,7 @@ module enclosure_body() {
                 cylinder(d=m3_tap_dia, h=lid_overlap + 1);
     }
 
-    // Pico mounting posts
+    // Pico mounting posts (M2)
     color("gray")
         pico_screw_positions()
             translate([0, 0, floor_thickness])
@@ -248,7 +248,7 @@ module enclosure_body() {
                     cylinder(d=m2_tap_dia, h=pico_standoff_h + 1);
                 }
 
-    // BNO086 mounting posts
+    // BNO086 mounting posts (M2)
     color("gray")
         bno_screw_positions()
             translate([0, 0, floor_thickness])

@@ -9,7 +9,7 @@ $fn = 128;
 part = "assembly"; // [assembly:Assembly View, enclosure:Enclosure Only, lid:Lid Only, shelf:Shelf Only]
 
 /* [Assembly View Options] */
-show_enclosure = false;
+show_enclosure = true;
 show_lid = true;
 show_shelf = true;
 show_boards = true;  // Shadow models for visualization
@@ -23,7 +23,8 @@ lid_clearance = 0.4;    // Clearance for lid lip fit
 
 /* [Screw Parameters] */
 m3_hole_dia = 3.4;      // Clearance hole for M3
-m3_tap_dia = 2.5;       // Hole for self-tapping M3 into plastic
+m3_tap_dia = 3.0;       // Hole for self-tapping M3 into plastic (accounts for ~0.5mm shrink)
+m2_tap_dia = 2.0;       // Hole for self-tapping M2 into plastic (accounts for ~0.5mm shrink)
 m3_head_dia = 6;        // M3 screw head diameter
 screw_boss_dia = 7;
 
@@ -64,7 +65,7 @@ oled_display_offset_x = (oled_pcb_w - oled_display_w) / 2;
 oled_glass_h = 1.5;
 oled_total_h = 4;
 oled_mount_hole_dia = 2.5;
-oled_mount_spacing = 38.61;
+oled_mount_spacing = 39.5;
 oled_hole_from_edge_x = 3.81;
 oled_hole_from_edge_y = 2.54;
 
@@ -76,7 +77,7 @@ relay_component_h = 16;
 relay_total_h = 20;
 relay_mount_hole_dia = 1.65;
 relay_mount_spacing_x = 20.32;
-relay_mount_spacing_y = 50.8;
+relay_mount_spacing_y = 52;
 relay_hole_edge_offset = 3.0;
 
 /* [Board Dimensions - Raspberry Pi Pico W] */
@@ -90,8 +91,8 @@ pico_usb_h = 3;
 pico_mount_hole_dia = 2.1;
 pico_hole_from_end = 4.8;
 pico_hole_from_side = 2.4;
-pico_hole_spacing_x = pico_pcb_w - 2*pico_hole_from_side;
-pico_hole_spacing_y = pico_pcb_l - 2*pico_hole_from_end;
+pico_hole_spacing_x = 11.34;
+pico_hole_spacing_y = 46.9;
 
 /* [Component Dimensions - Filtering Capacitor] */
 cap_dia = 13.5;
@@ -254,10 +255,16 @@ module shelf_screw_positions() {
 // ============================================================
 
 module enclosure_body() {
-    display_margin = 2;
+    // OLED cutout margins (inset from display edge)
+    oled_margin_top = 3;      // hole side (-Y direction)
+    oled_margin_bottom = 2.5; // +Y direction
+    oled_margin_side = 1.5;   // both X sides
+
     display_center_x = -oled_pcb_w/2 + oled_display_offset_x + oled_display_w/2;
+    oled_cutout_w = oled_display_w - 2*oled_margin_side;
+    oled_cutout_l = oled_display_l - oled_margin_top - oled_margin_bottom;
     oled_cutout_x = oled_x + display_center_x;
-    oled_cutout_y = oled_y;
+    oled_cutout_y = oled_y + (oled_margin_top - oled_margin_bottom)/2;  // shift for asymmetry
 
     difference() {
         rounded_box(enclosure_w, enclosure_l, enclosure_h, corner_radius);
@@ -273,11 +280,11 @@ module enclosure_body() {
 
         // Encoder shaft hole
         translate([twist_x, twist_y, -1])
-            cylinder(d=twist_shaft_dia + 1, h=wall_thickness + 2);
+            cylinder(d=twist_shaft_dia + 1.3, h=wall_thickness + 2);
 
         // OLED display window
         translate([oled_cutout_x, oled_cutout_y, (wall_thickness + enclosure_h)/2])
-            cube([oled_display_w + 2*display_margin, oled_display_l + 2*display_margin, enclosure_h - wall_thickness + 10], center=true);
+            cube([oled_cutout_w, oled_cutout_l, enclosure_h - wall_thickness + 10], center=true);
 
         // Engraved text on front face (Z=0, XY plane), at bottom edge
         translate([0, enclosure_l/2 - 6, -0.5])
@@ -343,7 +350,7 @@ module enclosure_body() {
                 cylinder(d=m3_tap_dia, h=lid_overlap + 1);
     }
 
-    // Twist mounting posts
+    // Twist mounting posts (M2)
     color("gray") {
         post_x_offset = twist_pcb_w/2 - twist_hole_edge_offset;
         post_y_offset = twist_pcb_l/2 - twist_hole_edge_offset;
@@ -353,21 +360,21 @@ module enclosure_body() {
                     for (dy = [-post_y_offset, post_y_offset])
                         translate([dx, dy, 0])
                             difference() {
-                                cylinder(d=5, h=twist_standoff_h);
-                                cylinder(d=1.8, h=twist_standoff_h + 1);
+                                cylinder(d=5.5, h=twist_standoff_h);
+                                cylinder(d=m2_tap_dia, h=twist_standoff_h + 1);
                             }
     }
 
-    // OLED mounting posts (rotated 180deg, holes now on -Y side)
+    // OLED mounting posts (M2, rotated 180deg, holes now on -Y side)
     oled_hole_y_offset = oled_pcb_l/2 - oled_hole_from_edge_y;
     color("gray") {
         for (dx = [-oled_mount_spacing/2, oled_mount_spacing/2])
             translate([oled_x + dx, oled_y - oled_hole_y_offset, wall_thickness])
                 difference() {
-                    cylinder(d=5, h=oled_standoff_h);
-                    cylinder(d=1.8, h=oled_standoff_h + 1);
+                    cylinder(d=5.5, h=oled_standoff_h);
+                    cylinder(d=m2_tap_dia, h=oled_standoff_h + 1);
                     translate([oled_cutout_x - (oled_x + dx), oled_cutout_y - (oled_y - oled_hole_y_offset), (enclosure_h - wall_thickness)/2])
-                        cube([oled_display_w + 2*display_margin, oled_display_l + 2*display_margin, enclosure_h - wall_thickness + 10], center=true);
+                        cube([oled_cutout_w, oled_cutout_l, enclosure_h - wall_thickness + 10], center=true);
                 }
     }
 
@@ -411,7 +418,7 @@ module enclosure_body() {
                     cylinder(d=m3_tap_dia, h=lid_overlap + 2);
 
                 translate([oled_cutout_x, oled_cutout_y, (wall_thickness + enclosure_h)/2])
-                    cube([oled_display_w + 2*display_margin, oled_display_l + 2*display_margin, enclosure_h], center=true);
+                    cube([oled_cutout_w, oled_cutout_l, enclosure_h], center=true);
             }
         }
 }
@@ -422,6 +429,7 @@ module enclosure_body() {
 
 module enclosure_lid() {
     lip_thickness = 1.5;  // Thin alignment lip
+    lid_corner_notch = screw_boss_dia + 2;  // Cutout size to clear corner screw posts
 
     difference() {
         union() {
@@ -445,6 +453,18 @@ module enclosure_lid() {
                             lid_overlap + 2,
                             max(0.5, corner_radius - wall_thickness - lip_thickness)
                         );
+                    // Corner notches to clear screw posts
+                    lip_half_w = (enclosure_w - 2*wall_thickness - lid_clearance) / 2;
+                    lip_half_l = (enclosure_l - 2*wall_thickness - lid_clearance) / 2;
+                    for (sx = [-1, 1])
+                        for (sy = [-1, 1]) {
+                            corner_x = sx * lip_half_w;
+                            corner_y = sy * lip_half_l;
+                            cube_x = (sx > 0) ? corner_x - lid_corner_notch : corner_x - 1;
+                            cube_y = (sy > 0) ? corner_y - lid_corner_notch : corner_y - 1;
+                            translate([cube_x, cube_y, -1])
+                                cube([lid_corner_notch + 1, lid_corner_notch + 1, lid_overlap + 4]);
+                        }
                 }
         }
 
@@ -505,25 +525,22 @@ module component_shelf() {
                         cylinder(d=5, h=shelf_standoff_h);
         }
 
-        // Mounting screw holes with countersink on top
-        shelf_screw_positions() {
+        // Mounting screw holes (clearance for pan-head screws)
+        shelf_screw_positions()
             translate([0, 0, -1])
                 cylinder(d=m3_hole_dia, h=shelf_thickness + 2);
-            translate([0, 0, shelf_thickness - 1.5])
-                cylinder(d1=m3_hole_dia, d2=m3_head_dia, h=1.5);  // Conical countersink
-        }
 
-        // Pico screw holes
+        // Pico screw holes (M2)
         for (dx = [-pico_hole_spacing_x/2, pico_hole_spacing_x/2])
             for (dy = [-pico_hole_spacing_y/2, pico_hole_spacing_y/2])
                 translate([pico_x + dx, pico_y + dy, -1])
-                    cylinder(d=2.2, h=shelf_thickness + shelf_standoff_h + 2);
+                    cylinder(d=m2_tap_dia, h=shelf_thickness + shelf_standoff_h + 2);
 
-        // Relay screw holes
+        // Relay screw holes (M2)
         for (dx = [-relay_mount_spacing_x/2, relay_mount_spacing_x/2])
             for (dy = [-relay_mount_spacing_y/2, relay_mount_spacing_y/2])
                 translate([relay_x + dx, relay_y + dy, -1])
-                    cylinder(d=1.8, h=shelf_thickness + shelf_standoff_h + 2);
+                    cylinder(d=m2_tap_dia, h=shelf_thickness + shelf_standoff_h + 2);
 
         // Cable routing cutout
         translate([-7.5, -15, -1])

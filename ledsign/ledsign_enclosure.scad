@@ -35,8 +35,8 @@ pico_usb_w = 8;
 pico_usb_h = 3;
 pico_hole_from_end = 4.8;
 pico_hole_from_side = 2.0;
-pico_hole_spacing_x = pico_pcb_w - 2*pico_hole_from_side;
-pico_hole_spacing_y = pico_pcb_l - 2*pico_hole_from_end;
+pico_hole_spacing_x = 11.34;
+pico_hole_spacing_y = 46.9;
 
 /* [Barrel Jack - LUORNG DC-099 5.5x2.1mm] */
 // https://www.amazon.com/LUORNG-Threaded-Connector-Pre-soldered-Waterproof/dp/B09H5L3KN5
@@ -68,9 +68,9 @@ stand_height = 40;          // Height of stand bump
 
 /* [Screw Parameters] */
 m3_hole_dia = 3.4;
-m3_tap_dia = 2.5;
+m3_tap_dia = 3.0;           // Hole for self-tapping M3 (accounts for ~0.5mm shrink)
 m3_head_dia = 6;
-m2_tap_dia = 1.8;
+m2_tap_dia = 2.0;           // Hole for self-tapping M2 (accounts for ~0.5mm shrink)
 screw_boss_dia = 7;
 
 // ============================================================
@@ -96,14 +96,14 @@ module led_array_shadow() {
     // Flex PCB - dark purple
     color("indigo", 0.9)
         cube([led_array_w + 10, led_array_h + 10, flex_pcb_thickness], center=true);
-    // LEDs - rainbow pattern
+    // LEDs - rainbow pattern (pointing toward face / -Z direction)
     for (i = [0:led_count_x-1])
         for (j = [0:led_count_y-1]) {
             led_x = -led_array_w/2 + led_size/2 + i * led_pitch;
             led_y = -led_array_h/2 + led_size/2 + j * led_pitch;
             // Rainbow hue based on position
             hue = ((i + j) % 16) / 16;
-            translate([led_x, led_y, flex_pcb_thickness/2 + 0.5])
+            translate([led_x, led_y, -flex_pcb_thickness/2 - 0.5])
                 color([cos(hue*360)*0.5+0.5, cos((hue+0.33)*360)*0.5+0.5, cos((hue+0.66)*360)*0.5+0.5], 0.95)
                     cube([led_size, led_size, 1], center=true);
         }
@@ -198,48 +198,45 @@ module logo_embossed() {
 // ============================================================
 
 module sign_face() {
-    union() {
-        difference() {
-            union() {
-                // Main face plate (at Z=0, this is the front surface)
-                rounded_rect(outer_w, outer_h, face_thickness, corner_radius);
+    difference() {
+        union() {
+            // Main face plate (at Z=0, this is the front surface)
+            rounded_rect(outer_w, outer_h, face_thickness, corner_radius);
 
-                // Rim that extends into back piece (in +Z direction)
-                translate([0, 0, face_thickness])
-                    difference() {
-                        rounded_rect(outer_w, outer_h, face_rim_height, corner_radius);
-                        translate([0, 0, -0.1])
-                            rounded_rect(outer_w - wall_thickness*2, outer_h - wall_thickness*2,
-                                        face_rim_height + 0.2, max(1, corner_radius - wall_thickness));
-                    }
-            }
-
-            // LED holes - 16x16 grid (cut through face plate)
-            for (i = [0:led_count_x-1])
-                for (j = [0:led_count_y-1]) {
-                    led_x = -led_array_w/2 + led_size/2 + i * led_pitch;
-                    led_y = -led_array_h/2 + led_size/2 + j * led_pitch;
-                    translate([led_x - led_hole_size/2, led_y - led_hole_size/2, -0.1])
-                        cube([led_hole_size, led_hole_size, face_thickness + 0.2]);
+            // Rim that extends into back piece (in +Z direction)
+            translate([0, 0, face_thickness])
+                difference() {
+                    rounded_rect(outer_w, outer_h, face_rim_height, corner_radius);
+                    translate([0, 0, -0.1])
+                        rounded_rect(outer_w - wall_thickness*2, outer_h - wall_thickness*2,
+                                    face_rim_height + 0.2, max(1, corner_radius - wall_thickness));
                 }
-
-            // Screw holes (straight through for pan-head screws)
-            screw_positions()
-                translate([0, 0, -0.1])
-                    cylinder(d=m3_hole_dia, h=face_thickness + face_rim_height + 0.2);
         }
 
-        // Embossed logo in top margin area (between LED array and outer edge)
-        // Position: X centered, Y in margin closer to bottom edge, Z on top of face
-        translate([0, outer_h/2 - led_margin/2 - wall_thickness + 1.5, -logo_depth])
-            linear_extrude(height=logo_depth, convexity=10)
+        // LED holes - 16x16 grid (cut through face plate)
+        for (i = [0:led_count_x-1])
+            for (j = [0:led_count_y-1]) {
+                led_x = -led_array_w/2 + led_size/2 + i * led_pitch;
+                led_y = -led_array_h/2 + led_size/2 + j * led_pitch;
+                translate([led_x - led_hole_size/2, led_y - led_hole_size/2, -0.1])
+                    cube([led_hole_size, led_hole_size, face_thickness + 0.2]);
+            }
+
+        // Screw holes (straight through for pan-head screws)
+        screw_positions()
+            translate([0, 0, -0.1])
+                cylinder(d=m3_hole_dia, h=face_thickness + face_rim_height + 0.2);
+
+        // Engraved logo in top margin area
+        translate([0, outer_h/2 - led_margin/2 - wall_thickness + 1.5, -0.1])
+            linear_extrude(height=logo_depth + 0.1, convexity=10)
                 scale([logo_scale, logo_scale])
                     translate([-logo_width/2, -logo_height/2])
                         import(logo_file, convexity=10);
 
-        // Embossed text at bottom margin (same approach as logo)
-        translate([0, -outer_h/2 + led_margin/2 + wall_thickness - 2, -0.6])
-            linear_extrude(height=0.6)
+        // Engraved text at bottom margin
+        translate([0, -outer_h/2 + led_margin/2 + wall_thickness - 2, -0.1])
+            linear_extrude(height=0.6 + 0.1)
                 mirror([1, 0, 0])
                     text("Mirror Articulate Intelligence",
                          size=7,
@@ -254,9 +251,11 @@ module sign_face() {
 // ============================================================
 
 module sign_back() {
+    screw_post_h = back_depth - wall_thickness;  // Height of screw posts inside cavity
+
     difference() {
         union() {
-            // Main back plate (solid - no interior cavity)
+            // Main back plate
             rounded_rect(outer_w, outer_h, back_depth, corner_radius);
 
             // Stand bump-out at bottom - extends from outer back surface
@@ -278,18 +277,69 @@ module sign_back() {
                 }
         }
 
+        // Interior cavity (hollow out the back, keeping back wall)
+        translate([0, 0, -0.1])
+            rounded_rect(outer_w - wall_thickness*2, outer_h - wall_thickness*2,
+                        back_depth - wall_thickness + 0.1, max(1, corner_radius - wall_thickness));
+
+        // Bump interior cavity - hollows out bump and extends into main body
+        // Creates angled cut for printability (no overhang)
+        // Hull from main cavity floor to bump interior ceiling
+        // Ceiling at stand_height (not stand_height - wall_thickness) for uniform wall thickness
+        translate([0, -outer_h/2, 0])
+            hull() {
+                // Floor in main cavity (same width as bump interior)
+                translate([0, wall_thickness + 35, -0.1])
+                    cube([outer_w - 10 - wall_thickness*2, 70, 0.1], center=true);
+                // Bump interior ceiling - front edge (wall_thickness below outer surface)
+                translate([0, wall_thickness + 1, back_depth + stand_height - wall_thickness + 1])
+                    cube([outer_w - 10 - wall_thickness*2, 2, 0.1], center=true);
+                // Bump interior ceiling - back edge (follows bump angle)
+                translate([0, stand_bump_depth * tan(stand_angle) + wall_thickness, back_depth + stand_height - wall_thickness + 1])
+                    cube([outer_w - 10 - wall_thickness*2, 2, 0.1], center=true);
+            }
+
         // Barrel jack hole (side of stand bump - near bottom corner)
         // Bump is (outer_w - 10) wide, so edge is at outer_w/2 - 5
         translate([outer_w/2 - 5, -outer_h/2 + 15, back_depth + barrel_jack_hole_dia/2 + 2])
             rotate([0, 90, 0])
                 cylinder(d=barrel_jack_hole_dia, h=20, center=true);
-
-        // Screw holes (tap holes) - from front side
-        screw_positions()
-            translate([0, 0, -0.1])
-                cylinder(d=m3_tap_dia, h=8);
     }
 
+    // Screw posts with gussets connecting to walls
+    gusset_len = 8;
+    inner_half_w = (outer_w - 2*wall_thickness) / 2;
+    inner_half_h = (outer_h - 2*wall_thickness) / 2;
+    inset = screw_boss_dia/2 + 3;  // matches screw_positions() inset
+    boss_inset = screw_boss_dia/2 - 1;
+
+    for (sx = [-1, 1])
+        for (sy = [-1, 1]) {
+            corner_x = sx * inner_half_w;
+            corner_y = sy * inner_half_h;
+            screw_x = sx * (outer_w/2 - inset);
+            screw_y = sy * (outer_h/2 - inset);
+
+            difference() {
+                hull() {
+                    // Screw boss
+                    translate([screw_x, screw_y, 0])
+                        cylinder(d=screw_boss_dia, h=screw_post_h);
+                    // Corner connection
+                    translate([corner_x, corner_y, 0])
+                        cylinder(d=3, h=screw_post_h);
+                    // Gusset arms along walls
+                    translate([corner_x - sx*gusset_len, corner_y, 0])
+                        cylinder(d=3, h=screw_post_h);
+                    translate([corner_x, corner_y - sy*gusset_len, 0])
+                        cylinder(d=3, h=screw_post_h);
+                }
+
+                // Screw tap hole
+                translate([screw_x, screw_y, -0.1])
+                    cylinder(d=m3_tap_dia, h=screw_post_h + 0.2);
+            }
+        }
 }
 
 // ============================================================
