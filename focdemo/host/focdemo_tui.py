@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""
+FOC Demo TUI — Curses-based dashboard for the iCE40 FOC BLDC controller.
+
+Communicates via compact binary serial protocol over USB-serial adapter.
+Frame format: [0xA5 sync][CMD 1B][LEN 1B][PAYLOAD 0-32B][CRC8 1B]
+
+Usage:
+    python3 focdemo_tui.py [--port /dev/ttyUSB0] [--baud 115200]
+"""
+
+import argparse
+import curses
+import struct
+import sys
+import threading
+import time
+from collections import deque
+
+import serial
+
+# =============================================================================
+# Protocol Constants
+# =============================================================================
+SYNC_BYTE = 0xA5
+
+# Host → FPGA commands
+CMD_SET_MODE     = 0x01
+CMD_SET_TORQUE   = 0x02
+CMD_SET_SPEED    = 0x03
+CMD_SET_POS      = 0x04
+CMD_SET_ENABLE   = 0x05
+CMD_SET_GAINS    = 0x06
+CMD_GET_STATUS   = 0x10
+CMD_STREAM_START = 0x20
+CMD_STREAM_STOP  = 0x21
+CMD_RESET        = 0xFF
+
+# FPGA → Host responses
+CMD_ACK    = 0x80
+CMD_NACK   = 0x81
+CMD_STATUS = 0x90
+
+MODE_NAMES = {0: "TORQUE", 1: "SPEED", 2: "POSITION"}
+
+
+# =============================================================================
+# CRC-8/MAXIM (poly 0x31)
+# =============================================================================
+def crc8_maxim(data: bytes) -> int:
+    crc = 0x00
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x80:
+                crc = ((crc << 1) ^ 0x31) & 0xFF
+            else:
+                crc = (crc << 1) & 0xFF
+    return crc
+
+
+# =============================================================================
+# Frame Builder / Parser
+# =============================================================================
+def build_frame(cmd: int, payload: bytes = b"") -> bytes:
+    """Build a binary protocol frame."""
+    length = len(payload)
+    body = bytes([cmd, length]) + payload
+    crc = crc8_maxim(body)
+    return bytes([SYNC_BYTE]) + body + bytes([crc])
+
+
+def parse_status_payload(payload: bytes) -> dict:
+    """Parse a 17-byte STATUS response payload."""
+    if len(payload) < 17:
+        return {}
+    mode = payload[0]
+    enable = payload[1]
+    fault = payload[2]
+    pos, speed, id_val, iq_val = struct.unpack_from("<HhhH", payload, 3)
+    # Fix: iq should be signed
+    iq_val = struct.unpack_from("<h", payload, 9)[0]
+    pwm_a, pwm_b, pwm_c = struct.unpack_from("<HHH", payload, 11)
+    return {
+        "mode": mode,
+        "enable": enable,
+        "fault": fault,
+        "pos": pos,
+        "speed": speed,
+        "id": id_val,
+        "iq": iq_val,
+        "pwm_a": pwm_a,
+        "pwm_b": pwm_b,
+        "pwm_c": pwm_c,
+    }
+
+
+# =============================================================================
+# Serial Communication Thread
+# =============================================================================
+class FocSerial:
+    def __init__(self, port: str, baud: int):
+        self.ser = serial.Serial(port, baud, timeout=0.1)
+        self.lock = threading.Lock()
+        self.status = {}
+        self.connected = True
+        self.rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
+        self.rx_thread.start()
+        # Telemetry history for sparkline plots
+        self.iq_history = deque(maxlen=40)
+        self.id_history = deque(maxlen=40)
+        self.speed_history = deque(maxlen=40)
+
+    def _rx_loop(self):
+        """Background thread: read and parse incoming frames."""
+        buf = bytearray()
+        while self.connected:
+            try:
+                data = self.ser.read(64)
+                if not data:
+                    continue
+                buf.extend(data)
+                # Try to parse frames from buffer
+                while len(buf) >= 4:
+                    # Find sync byte
+                    idx = buf.find(SYNC_BYTE)
+                    if idx < 0:
+                        buf.clear()
+                        break
+                    if idx > 0:
+                        del buf[:idx]
+                    if len(buf) < 4:
+                        break
+                    cmd = buf[1]
+                    length = buf[2]
+                    frame_len = 4 + length  # sync + cmd + len + payload + crc
+                    if len(buf) < frame_len:
+                        break
+                    payload = bytes(buf[3 : 3 + length])
+                    crc_rx = buf[3 + length]
+                    crc_calc = crc8_maxim(bytes(buf[1 : 3 + length]))
+                    if crc_rx == crc_calc:
+                        self._handle_frame(cmd, payload)
+                    del buf[:frame_len]
+            except (serial.SerialException, OSError):
+                self.connected = False
+                break
+
+    def _handle_frame(self, cmd: int, payload: bytes):
+        if cmd == CMD_STATUS:
+            status = parse_status_payload(payload)
+            with self.lock:
+                self.status = status
+                self.iq_history.append(status.get("iq", 0))
+                self.id_history.append(status.get("id", 0))
+                self.speed_history.append(status.get("speed", 0))
+
+    def send(self, cmd: int, payload: bytes = b""):
+        frame = build_frame(cmd, payload)
+        with self.lock:
+            try:
+                self.ser.write(frame)
+            except (serial.SerialException, OSError):
+                self.connected = False
+
+    def set_enable(self, en: bool):
+        self.send(CMD_SET_ENABLE, bytes([1 if en else 0]))
+
+    def set_mode(self, mode: int):
+        self.send(CMD_SET_MODE, bytes([mode & 0xFF]))
+
+    def set_torque(self, iq_ref: int):
+        self.send(CMD_SET_TORQUE, struct.pack("<h", iq_ref))
+
+    def set_speed(self, speed: int):
+        self.send(CMD_SET_SPEED, struct.pack("<h", speed))
+
+    def set_position(self, pos: int):
+        self.send(CMD_SET_POS, struct.pack("<H", pos))
+
+    def set_gains(self, loop_id: int, kp: int, ki: int):
+        self.send(CMD_SET_GAINS, struct.pack("<Bhh", loop_id, kp, ki))
+
+    def start_stream(self, period_ms: int = 50):
+        self.send(CMD_STREAM_START, bytes([period_ms & 0xFF]))
+
+    def stop_stream(self):
+        self.send(CMD_STREAM_STOP)
+
+    def get_status(self):
+        self.send(CMD_GET_STATUS)
+
+    def reset(self):
+        self.send(CMD_RESET)
+
+    def close(self):
+        self.connected = False
+        self.stop_stream()
+        time.sleep(0.1)
+        self.ser.close()
+
+
+# =============================================================================
+# Sparkline Rendering
+# =============================================================================
+SPARK_CHARS = " _.,:-=!#"
+
+
+def sparkline(values, width=40, vmin=None, vmax=None):
+    """Render a sparkline string from a sequence of numeric values."""
+    if not values:
+        return " " * width
+    vals = list(values)[-width:]
+    if vmin is None:
+        vmin = min(vals)
+    if vmax is None:
+        vmax = max(vals)
+    span = vmax - vmin if vmax != vmin else 1
+    chars = []
+    for v in vals:
+        idx = int((v - vmin) / span * (len(SPARK_CHARS) - 1))
+        idx = max(0, min(len(SPARK_CHARS) - 1, idx))
+        chars.append(SPARK_CHARS[idx])
+    return "".join(chars).ljust(width)
+
+
+# =============================================================================
+# TUI Application
+# =============================================================================
+def tui_main(stdscr, foc: FocSerial, args):
+    curses.curs_set(0)
+    stdscr.timeout(100)  # 100ms refresh
+    stdscr.clear()
+
+    # Initialize color pairs
+    if curses.has_colors():
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_RED, -1)
+        curses.init_pair(2, curses.COLOR_GREEN, -1)
+        curses.init_pair(3, curses.COLOR_CYAN, -1)
+        curses.init_pair(4, curses.COLOR_YELLOW, -1)
+
+    # Local state for editing
+    local_enable = False
+    local_mode = 0
+    local_target = 0
+    editing_target = False
+    target_buf = ""
+    stream_period = 50
+
+    # Start streaming
+    foc.start_stream(stream_period)
+
+    # Gain state: [loop_id, kp, ki] for each loop
+    gains = {
+        "id":    [0, 128, 16],
+        "iq":    [1, 128, 16],
+        "speed": [2, 64,  4],
+        "pos":   [3, 32,  0],
+    }
+
+    while True:
+        try:
+            h, w = stdscr.getmaxyx()
+        except curses.error:
+            break
+
+        if h < 20 or w < 56:
+            stdscr.clear()
+            stdscr.addstr(0, 0, "Terminal too small (min 56x20)")
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key == ord("q"):
+                break
+            continue
+
+        stdscr.erase()
+
+        # Get current status
+        with foc.lock:
+            st = dict(foc.status)
+            iq_hist = list(foc.iq_history)
+            id_hist = list(foc.id_history)
+
+        conn_str = "Connected" if foc.connected else "DISCONNECTED"
+        fault_str = "FAULT" if st.get("fault", 0) else "None"
+
+        # Header
+        title = f" FOC Demo Controller "
+        stdscr.addstr(0, 0, "+" + "-" * (w - 2) + "+")
+        stdscr.addstr(0, (w - len(title)) // 2, title, curses.A_BOLD)
+        row = 1
+        info = f" Port: {args.port}  Baud: {args.baud}  Status: {conn_str}"
+        stdscr.addstr(row, 0, "|" + info.ljust(w - 2) + "|")
+        row += 1
+
+        # Motor section
+        stdscr.addstr(row, 0, "+" + "- Motor " + "-" * (w - 10) + "+")
+        row += 1
+
+        en_str = " ON " if local_enable else " OFF"
+        mode_str = MODE_NAMES.get(local_mode, "???")
+        motor_line = f" Enable: [{en_str}]   Mode: [{mode_str:8s}]   Fault: {fault_str}"
+        stdscr.addstr(row, 0, "|" + motor_line.ljust(w - 2) + "|")
+        if st.get("fault", 0) and curses.has_colors():
+            stdscr.chgat(row, motor_line.index("Fault:") + 1, len(fault_str) + 7, curses.color_pair(1) | curses.A_BOLD)
+        row += 1
+
+        if editing_target:
+            target_line = f" Target: {target_buf}_"
+        else:
+            unit = {0: "", 1: " cnt/s", 2: " counts"}.get(local_mode, "")
+            target_line = f" Target: {local_target}{unit}"
+        stdscr.addstr(row, 0, "|" + target_line.ljust(w - 2) + "|")
+        row += 1
+
+        # Telemetry section
+        stdscr.addstr(row, 0, "+" + f"- Telemetry ({stream_period}ms) " + "-" * (w - 20) + "+")
+        row += 1
+
+        pos_val = st.get("pos", 0)
+        spd_val = st.get("speed", 0)
+        tel1 = f" Position: {pos_val:6d}    Speed: {spd_val:6d} cnt/s"
+        stdscr.addstr(row, 0, "|" + tel1.ljust(w - 2) + "|")
+        row += 1
+
+        id_val = st.get("id", 0)
+        iq_val = st.get("iq", 0)
+        tel2 = f" Id:       {id_val:6d}    Iq:    {iq_val:6d}"
+        stdscr.addstr(row, 0, "|" + tel2.ljust(w - 2) + "|")
+        row += 1
+
+        pa = st.get("pwm_a", 0)
+        pb = st.get("pwm_b", 0)
+        pc = st.get("pwm_c", 0)
+        tel3 = f" PWM:  A={pa:4d}  B={pb:4d}  C={pc:4d}"
+        stdscr.addstr(row, 0, "|" + tel3.ljust(w - 2) + "|")
+        row += 1
+
+        # Gains section
+        stdscr.addstr(row, 0, "+" + "- Gains " + "-" * (w - 10) + "+")
+        row += 1
+
+        g1 = f" Id PI:  Kp={gains['id'][1]:4d}  Ki={gains['id'][2]:4d}     Iq PI:  Kp={gains['iq'][1]:4d}  Ki={gains['iq'][2]:4d}"
+        stdscr.addstr(row, 0, "|" + g1.ljust(w - 2) + "|")
+        row += 1
+
+        g2 = f" Speed:  Kp={gains['speed'][1]:4d}  Ki={gains['speed'][2]:4d}     Pos:    Kp={gains['pos'][1]:4d}"
+        stdscr.addstr(row, 0, "|" + g2.ljust(w - 2) + "|")
+        row += 1
+
+        # Sparkline plots
+        stdscr.addstr(row, 0, "+" + "- Current Plot " + "-" * (w - 17) + "+")
+        row += 1
+
+        plot_w = min(40, w - 10)
+        iq_spark = sparkline(iq_hist, plot_w, vmin=-2048, vmax=2048)
+        id_spark = sparkline(id_hist, plot_w, vmin=-2048, vmax=2048)
+        stdscr.addstr(row, 0, "|" + f"  Iq {iq_spark}".ljust(w - 2) + "|")
+        row += 1
+        stdscr.addstr(row, 0, "|" + f"  Id {id_spark}".ljust(w - 2) + "|")
+        row += 1
+
+        # Keys section
+        stdscr.addstr(row, 0, "+" + "- Keys " + "-" * (w - 9) + "+")
+        row += 1
+        keys = " e:enable  m:mode  t/s/p:set target  g:gains  r:reset  q:quit"
+        stdscr.addstr(row, 0, "|" + keys.ljust(w - 2) + "|")
+        row += 1
+        stdscr.addstr(row, 0, "+" + "-" * (w - 2) + "+")
+
+        stdscr.refresh()
+
+        # Handle input
+        key = stdscr.getch()
+        if key < 0:
+            continue
+
+        if editing_target:
+            if key == 10 or key == curses.KEY_ENTER:  # Enter
+                try:
+                    local_target = int(target_buf)
+                except ValueError:
+                    pass
+                editing_target = False
+                target_buf = ""
+                # Send appropriate command
+                if local_mode == 0:
+                    foc.set_torque(local_target)
+                elif local_mode == 1:
+                    foc.set_speed(local_target)
+                elif local_mode == 2:
+                    foc.set_position(local_target & 0xFFFF)
+            elif key == 27:  # Escape
+                editing_target = False
+                target_buf = ""
+            elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:
+                target_buf = target_buf[:-1]
+            elif 32 <= key < 127:
+                target_buf += chr(key)
+            continue
+
+        if key == ord("q"):
+            break
+        elif key == ord("e"):
+            local_enable = not local_enable
+            foc.set_enable(local_enable)
+        elif key == ord("m"):
+            local_mode = (local_mode + 1) % 3
+            foc.set_mode(local_mode)
+        elif key == ord("t"):
+            local_mode = 0
+            foc.set_mode(0)
+            editing_target = True
+            target_buf = ""
+        elif key == ord("s"):
+            local_mode = 1
+            foc.set_mode(1)
+            editing_target = True
+            target_buf = ""
+        elif key == ord("p"):
+            local_mode = 2
+            foc.set_mode(2)
+            editing_target = True
+            target_buf = ""
+        elif key == ord("r"):
+            foc.reset()
+            local_enable = False
+            local_mode = 0
+            local_target = 0
+        elif key == ord("g"):
+            # Cycle through gain editing (simplified: prompt via status line)
+            # In a full implementation this would open a sub-dialog
+            pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description="FOC Demo TUI Controller")
+    parser.add_argument("--port", default="/dev/ttyUSB0", help="Serial port")
+    parser.add_argument("--baud", type=int, default=115200, help="Baud rate")
+    args = parser.parse_args()
+
+    try:
+        foc = FocSerial(args.port, args.baud)
+    except serial.SerialException as e:
+        print(f"ERROR: Cannot open {args.port}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        curses.wrapper(lambda stdscr: tui_main(stdscr, foc, args))
+    finally:
+        foc.close()
+
+
+if __name__ == "__main__":
+    main()

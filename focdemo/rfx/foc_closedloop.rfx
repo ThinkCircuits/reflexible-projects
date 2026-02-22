@@ -1,0 +1,425 @@
+// Closed-Loop Field-Oriented Control (FOC) Reflex
+//
+// Implements a full cascaded current/speed/position control loop for a PMSM/BLDC
+// motor drive.  All arithmetic is Q15 fixed-point (scale = 32768).
+//
+// Signal chain per cycle:
+//   ADC currents -> Clarke -> Park -> current PI (id/iq)
+//   -> (mode-select outer loop) -> inv-Park -> inv-Clarke -> PWM
+//
+// Outer loop modes (input: mode):
+//   0 = Torque : iq_ref = cmd_iq_ref   (current loop only)
+//   1 = Speed  : speed PI -> iq_ref
+//   2 = Position: position P -> speed_ref -> speed PI -> iq_ref
+//
+// The id reference is always 0 (maximum-torque-per-amp for surface PMSM).
+//
+// Constants:
+//   INV_SQRT3_Q15 = 18919  (1/sqrt(3) * 32768, used in Clarke)
+//   SQRT3_OVER_2_Q15 = 28378  (sqrt(3)/2 * 32768, used in inverse Clarke)
+//
+// ADC / encoder conventions:
+//   ia_raw, ib_raw, ic_raw  : u16 in 0..4095, midpoint = 2048 (bipolar)
+//   encoder_raw             : u16 in 0..4095  (absolute position over one electrical rev)
+//   theta_elec = encoder_raw * 16   (maps 0-4095 -> 0-65535)
+//   cos_theta, sin_theta     : Q15 i16, sourced from external sincos_lut keyed by theta_elec
+//
+// Fault condition:  |id| > 1800  OR  |iq| > 1800  (raw ADC-derived, pre-scaled)
+// Safe (coasting) outputs: pwm_a = pwm_b = pwm_c = 512  (50 % duty, no active drive)
+
+reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl_mode(fsm), hdl_backpressure(true)) {
+
+  // ------------------------------------------------------------------
+  // INPUTS
+  // ------------------------------------------------------------------
+  input:  ia_raw:        u16,   // Phase A ADC reading (0-4095)
+          ib_raw:        u16,   // Phase B ADC reading (0-4095)
+          ic_raw:        u16,   // Phase C ADC reading (0-4095, redundant – used for fault check)
+          encoder_raw:   u16,   // Encoder ADC reading (0-4095)
+          cos_theta:     i16,   // cos(theta_elec) from sincos LUT, Q15
+          sin_theta:     i16,   // sin(theta_elec) from sincos LUT, Q15
+          enable:        bool,  // Drive enable (false -> coast)
+          mode:          u8,    // 0=torque, 1=speed, 2=position
+          cmd_iq_ref:    i16,   // Torque-mode iq reference (Q15 units)
+          cmd_speed_ref: i16,   // Speed-mode speed reference (encoder counts/cycle)
+          cmd_pos_ref:   u16,   // Position-mode position reference (encoder counts 0-4095)
+          kp_id:         i16,   // id current-loop proportional gain
+          ki_id:         i16,   // id current-loop integral gain
+          kp_iq:         i16,   // iq current-loop proportional gain
+          ki_iq:         i16,   // iq current-loop integral gain
+          kp_speed:      i16,   // Speed-loop proportional gain
+          ki_speed:      i16,   // Speed-loop integral gain
+          kp_pos:        i16    // Position-loop proportional gain (P-only)
+
+  // ------------------------------------------------------------------
+  // OUTPUTS
+  // ------------------------------------------------------------------
+  output: pwm_a:     u16,   // Phase A PWM duty cycle (0-1023)
+          pwm_b:     u16,   // Phase B PWM duty cycle (0-1023)
+          pwm_c:     u16,   // Phase C PWM duty cycle (0-1023)
+          theta_elec: u16,  // Electrical angle for sincos LUT (0-65535)
+          fault:     bool,  // Overcurrent fault latch
+          dbg_id:    i16,   // Debug: d-axis current (Q15)
+          dbg_iq:    i16,   // Debug: q-axis current (Q15)
+          dbg_speed: i16,   // Debug: estimated speed (encoder counts/cycle)
+          dbg_pos:   u16    // Debug: estimated position (encoder counts)
+
+  // ------------------------------------------------------------------
+  // STATE  (PI integrators + observer state)
+  // ------------------------------------------------------------------
+  state:  id_integrator:    i32 = 0,  // d-axis current PI integrator (i32 for headroom)
+          iq_integrator:    i32 = 0,  // q-axis current PI integrator
+          speed_integrator: i32 = 0,  // Speed PI integrator
+          last_encoder:     u16 = 0,  // Encoder reading from previous cycle
+          position:         u16 = 0,  // Tracked position (mirrors encoder_raw)
+          speed_est:        i16 = 0,  // Estimated speed (encoder counts/cycle, signed)
+          fault_latch:      bool = false  // Latching overcurrent fault flag
+
+  // ------------------------------------------------------------------
+  // SAFETY
+  // ------------------------------------------------------------------
+  safety {
+    input: {
+      ia_raw      in 0..4095,
+      ib_raw      in 0..4095,
+      ic_raw      in 0..4095,
+      encoder_raw in 0..4095,
+      cos_theta   in -32768..32767,
+      sin_theta   in -32768..32767,
+      enable      in { true, false },
+      mode        in 0..2,
+      cmd_iq_ref    in -8192..8192,
+      cmd_speed_ref in -8192..8192,
+      cmd_pos_ref   in 0..4095,
+      kp_id   in 0..32767,
+      ki_id   in 0..32767,
+      kp_iq   in 0..32767,
+      ki_iq   in 0..32767,
+      kp_speed in 0..32767,
+      ki_speed in 0..32767,
+      kp_pos   in 0..32767
+    }
+
+    state: {
+      id_integrator    in -2147483648..2147483647,
+      iq_integrator    in -2147483648..2147483647,
+      speed_integrator in -2147483648..2147483647,
+      last_encoder     in 0..4095,
+      position         in 0..4095,
+      speed_est        in -32768..32767,
+      fault_latch      in { true, false }
+    }
+
+    output: {
+      pwm_a      in 0..1023,
+      pwm_b      in 0..1023,
+      pwm_c      in 0..1023,
+      theta_elec in 0..65535,
+      fault      in { true, false },
+      dbg_id     in -32768..32767,
+      dbg_iq     in -32768..32767,
+      dbg_speed  in -32768..32767,
+      dbg_pos    in 0..4095
+    }
+
+    require: {
+      // When disabled or faulted the inverter must coast (50 % duty)
+      (!enable) -> ((pwm_a == 512) && (pwm_b == 512) && (pwm_c == 512)),
+      fault     -> ((pwm_a == 512) && (pwm_b == 512) && (pwm_c == 512))
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // CONTROL LOOP
+  // ------------------------------------------------------------------
+  loop {
+
+    // ================================================================
+    // STEP 1 – Update electrical angle for sincos LUT
+    // ================================================================
+    // Maps encoder_raw 0-4095 to theta_elec 0-65535 (multiply by 16).
+    // Output is consumed by the external sincos_lut this cycle so that
+    // cos_theta / sin_theta are valid on the *next* call; here we use
+    // the values that were already computed from the *previous* theta_elec.
+    theta_elec = encoder_raw * 16
+
+    // ================================================================
+    // STEP 2 – Speed and position estimation
+    // ================================================================
+    // Simple backward-difference speed estimator (encoder counts per cycle).
+    // Cast through i32 to handle wrap-around safely before clamping.
+    let raw_speed: i32 = (encoder_raw - last_encoder)
+    speed_est     = clamp(i32_to_i16(raw_speed), -4095, 4095)
+    position      = encoder_raw
+    last_encoder  = encoder_raw
+
+    // Expose observer outputs for debugging
+    dbg_speed = speed_est
+    dbg_pos   = position
+
+    // ================================================================
+    // STEP 3 – ADC current conversion  (0-4095 -> ±2047, centered)
+    // ================================================================
+    let ia: i16 = clamp(i32_to_i16(ia_raw - 2048), -2047, 2047)
+    let ib: i16 = clamp(i32_to_i16(ib_raw - 2048), -2047, 2047)
+    // Redundant phase-C from Kirchhoff (ic = -(ia + ib))
+    let ic_calc_raw: i32 = -(ia + ib)
+    let ic_calc: i16 = clamp(i32_to_i16(ic_calc_raw), -2047, 2047)
+
+    // ================================================================
+    // STEP 4 – Clarke transform  (3-phase -> alpha/beta)
+    // i_alpha = ia
+    // i_beta  = (ia + 2*ib) / sqrt(3)   [using Q15 constant 18919]
+    // ================================================================
+    let i_alpha: i16 = ia
+    let i_beta_temp: i32 = ((ia + (2 * ib)) * 18919) / 32768
+    let i_beta: i16 = clamp(i32_to_i16(i_beta_temp), -2047, 2047)
+
+    // ================================================================
+    // STEP 5 – Park transform  (alpha/beta -> d/q)
+    // id =  i_alpha*cos + i_beta*sin
+    // iq = -i_alpha*sin + i_beta*cos
+    // Q15 multiply: divide by 32768
+    // ================================================================
+    let id_temp: i32 = ((i_alpha * cos_theta) + (i_beta * sin_theta)) / 32768
+    let iq_temp: i32 = (-(i_alpha * sin_theta) + (i_beta * cos_theta)) / 32768
+    let id_meas: i16 = clamp(i32_to_i16(id_temp), -2047, 2047)
+    let iq_meas: i16 = clamp(i32_to_i16(iq_temp), -2047, 2047)
+
+    // Expose for debugging
+    dbg_id = id_meas
+    dbg_iq = iq_meas
+
+    // ================================================================
+    // STEP 6 – Overcurrent fault detection (latching via state)
+    // Fault if either axis current exceeds ±1800 (in ADC-scaled units)
+    // ================================================================
+    let abs_id: i16 = abs(id_meas)
+    let abs_iq: i16 = abs(iq_meas)
+    if ((abs_id > 1800) || (abs_iq > 1800)) {
+      fault_latch = true
+    }
+    // Clear fault latch only when the drive is explicitly disabled
+    if (!enable) {
+      fault_latch = false
+    }
+
+    // Always assign the output from the latch (satisfies all-path assignment)
+    fault = fault_latch
+
+    // ================================================================
+    // STEP 7 – Coast if disabled or faulted
+    // ================================================================
+    if ((!enable) || fault_latch) {
+      pwm_a = 512
+      pwm_b = 512
+      pwm_c = 512
+      // Reset all integrators so there is no wind-up when re-enabled
+      id_integrator    = 0
+      iq_integrator    = 0
+      speed_integrator = 0
+    } else {
+      // ==============================================================
+      // STEP 8 – Outer control loop (mode-dependent)
+      // ==============================================================
+      let iq_ref: i16 = 0
+      let speed_ref: i16 = 0
+
+      if (mode == 2) {
+        // ----- Position mode: P controller -> speed_ref -----
+        let pos_error: i32 = (cmd_pos_ref - position)
+        let speed_cmd: i32 = (pos_error * kp_pos) / 256
+        speed_ref = clamp(i32_to_i16(speed_cmd), -8192, 8192)
+
+        // Speed PI -> iq_ref
+        let spd_error: i16 = clamp(i32_to_i16(speed_ref - speed_est), -8192, 8192)
+        speed_integrator = clamp(speed_integrator + spd_error, -524288, 524288)
+        let spd_p: i32 = (spd_error * kp_speed) / 256
+        let spd_i: i32 = (speed_integrator * ki_speed) / 65536
+        iq_ref = clamp(i32_to_i16(spd_p + spd_i), -8192, 8192)
+
+      } elif (mode == 1) {
+        // ----- Speed mode: speed PI -> iq_ref -----
+        speed_ref = cmd_speed_ref
+        let spd_error: i16 = clamp(i32_to_i16(speed_ref - speed_est), -8192, 8192)
+        speed_integrator = clamp(speed_integrator + spd_error, -524288, 524288)
+        let spd_p: i32 = (spd_error * kp_speed) / 256
+        let spd_i: i32 = (speed_integrator * ki_speed) / 65536
+        iq_ref = clamp(i32_to_i16(spd_p + spd_i), -8192, 8192)
+
+      } else {
+        // ----- Torque mode (mode == 0): direct iq reference -----
+        iq_ref = clamp(cmd_iq_ref, -8192, 8192)
+        // Speed integrator is not driven in torque mode; decay to zero
+        // to prevent stale state if mode is later switched.
+        speed_integrator = 0
+      }
+
+      // ==============================================================
+      // STEP 9 – Current PI controllers  (d-axis and q-axis)
+      // id reference is always 0 (field-aligned, MTPA for surface PMSM)
+      // ==============================================================
+      // --- d-axis ---
+      let id_error: i16 = clamp(i32_to_i16(0 - id_meas), -2047, 2047)
+      id_integrator = clamp(id_integrator + id_error, -524288, 524288)
+      let vd_p: i32 = (id_error * kp_id) / 256
+      let vd_i: i32 = (id_integrator * ki_id) / 65536
+      let vd_raw: i32 = vd_p + vd_i
+      let target_v_d: i16 = clamp(i32_to_i16(vd_raw), -8192, 8192)
+
+      // --- q-axis ---
+      let iq_error: i16 = clamp(i32_to_i16(iq_ref - iq_meas), -8192, 8192)
+      iq_integrator = clamp(iq_integrator + iq_error, -524288, 524288)
+      let vq_p: i32 = (iq_error * kp_iq) / 256
+      let vq_i: i32 = (iq_integrator * ki_iq) / 65536
+      let vq_raw: i32 = vq_p + vq_i
+      let target_v_q: i16 = clamp(i32_to_i16(vq_raw), -8192, 8192)
+
+      // ==============================================================
+      // STEP 10 – Inverse Park transform  (d/q -> alpha/beta)
+      // v_alpha =  vd*cos - vq*sin
+      // v_beta  =  vd*sin + vq*cos
+      // ==============================================================
+      let v_alpha_temp: i32 = ((target_v_d * cos_theta) - (target_v_q * sin_theta)) / 32768
+      let v_beta_temp: i32  = ((target_v_d * sin_theta) + (target_v_q * cos_theta)) / 32768
+      let v_alpha: i16 = clamp(i32_to_i16(v_alpha_temp), -8192, 8192)
+      let v_beta: i16  = clamp(i32_to_i16(v_beta_temp),  -8192, 8192)
+
+      // ==============================================================
+      // STEP 11 – Inverse Clarke transform  (alpha/beta -> 3-phase)
+      // v_a =  v_alpha
+      // v_b = -v_alpha/2 + sqrt(3)/2 * v_beta   [28378 = sqrt(3)/2 * 32768]
+      // v_c = -v_alpha/2 - sqrt(3)/2 * v_beta
+      // ==============================================================
+      let v_a: i16 = v_alpha
+      let v_b_temp: i32 = ((-v_alpha) / 2) + ((v_beta * 28378) / 32768)
+      let v_c_temp: i32 = ((-v_alpha) / 2) - ((v_beta * 28378) / 32768)
+      let v_b: i16 = clamp(i32_to_i16(v_b_temp), -8192, 8192)
+      let v_c: i16 = clamp(i32_to_i16(v_c_temp), -8192, 8192)
+
+      // ==============================================================
+      // STEP 12 – PWM conversion
+      // Centre = 512, full-scale voltage ±8192 maps to ±512 counts
+      // Divide by 16 to scale: 8192/16 = 512
+      // ==============================================================
+      pwm_a = clamp(i32_to_u16(512 + (v_a / 16)), 0, 1023)
+      pwm_b = clamp(i32_to_u16(512 + (v_b / 16)), 0, 1023)
+      pwm_c = clamp(i32_to_u16(512 + (v_c / 16)), 0, 1023)
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // INLINE TESTS
+  // ------------------------------------------------------------------
+  tests {
+    reset_state
+
+    // Test 1 – Disabled drive coasts (pwm = 512 on all phases, no fault)
+    test disabled_coasts
+      inputs: {
+        ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
+        encoder_raw = 0,
+        cos_theta = 32767, sin_theta = 0,
+        enable = false, mode = 0,
+        cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
+        kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
+        kp_speed = 128, ki_speed = 16, kp_pos = 64
+      },
+      expect: { pwm_a = 512, pwm_b = 512, pwm_c = 512, fault = false }
+
+    // Test 2 – Enabled, zero command, zero current: outputs centred at 512
+    // (id_ref = 0, iq_ref = 0, both errors = 0, vd = vq = 0 -> v_alpha = v_beta = 0)
+    test zero_command_enabled
+      state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
+               last_encoder = 0, position = 0, speed_est = 0 },
+      inputs: {
+        ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
+        encoder_raw = 0,
+        cos_theta = 32767, sin_theta = 0,
+        enable = true, mode = 0,
+        cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
+        kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
+        kp_speed = 128, ki_speed = 16, kp_pos = 64
+      },
+      expect: { pwm_a = 512, pwm_b = 512, pwm_c = 512, fault = false }
+
+    // Test 3 – Overcurrent on d-axis trips fault and forces coast
+    // ia_raw = 4000 -> ia = 1952; ib_raw = 2048 -> ib = 0
+    // i_alpha = 1952, i_beta ~ 0
+    // With cos=32767, sin=0: id ~ 1952 > 1800 -> fault
+    test fault_on_overcurrent
+      state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
+               last_encoder = 0, position = 0, speed_est = 0 },
+      inputs: {
+        ia_raw = 3900, ib_raw = 2048, ic_raw = 2048,
+        encoder_raw = 0,
+        cos_theta = 32767, sin_theta = 0,
+        enable = true, mode = 0,
+        cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
+        kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
+        kp_speed = 128, ki_speed = 16, kp_pos = 64
+      },
+      expect: { fault = true, pwm_a = 512, pwm_b = 512, pwm_c = 512 }
+
+    // Test 4 – Fault cleared on next cycle when enable goes low
+    // (fault latch resets when enable = false)
+    test fault_clears_on_disable
+      state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
+               last_encoder = 0, position = 0, speed_est = 0 },
+      inputs: {
+        ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
+        encoder_raw = 0,
+        cos_theta = 32767, sin_theta = 0,
+        enable = false, mode = 0,
+        cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
+        kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
+        kp_speed = 128, ki_speed = 16, kp_pos = 64
+      },
+      expect: { fault = false, pwm_a = 512, pwm_b = 512, pwm_c = 512 }
+
+    // Test 5 – Speed mode: zero speed error with zero current yields coast
+    test speed_mode_idle
+      state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
+               last_encoder = 100, position = 100, speed_est = 0 },
+      inputs: {
+        ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
+        encoder_raw = 100,
+        cos_theta = 32767, sin_theta = 0,
+        enable = true, mode = 1,
+        cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
+        kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
+        kp_speed = 128, ki_speed = 16, kp_pos = 64
+      },
+      expect: { pwm_a = 512, pwm_b = 512, pwm_c = 512, fault = false }
+
+    // Test 6 – Position mode: zero position error yields coast
+    test position_mode_at_target
+      state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
+               last_encoder = 200, position = 200, speed_est = 0 },
+      inputs: {
+        ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
+        encoder_raw = 200,
+        cos_theta = 32767, sin_theta = 0,
+        enable = true, mode = 2,
+        cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 200,
+        kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
+        kp_speed = 128, ki_speed = 16, kp_pos = 64
+      },
+      expect: { pwm_a = 512, pwm_b = 512, pwm_c = 512, fault = false }
+
+    // Test 7 – theta_elec tracks encoder_raw * 16
+    test theta_elec_from_encoder
+      state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
+               last_encoder = 0, position = 0, speed_est = 0 },
+      inputs: {
+        ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
+        encoder_raw = 1024,
+        cos_theta = 32767, sin_theta = 0,
+        enable = false, mode = 0,
+        cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
+        kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
+        kp_speed = 128, ki_speed = 16, kp_pos = 64
+      },
+      expect: { theta_elec = 16384 }
+  }
+}
