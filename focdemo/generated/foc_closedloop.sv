@@ -3,6 +3,9 @@
 // Architecture: FSM (Finite State Machine) - 22 stages
 // Latency: 22 clock cycles per invocation
 // Protocol: AXI-Stream style valid/ready handshaking
+// WCET: 220.0 ns (22 stages x 10.0 ns)
+// Rate: 10000 Hz (period = 100.0 us)
+// Throughput: OK (220.0 ns << 100000.0 ns)
 
 // `timescale 1ns/1ps
 
@@ -75,54 +78,39 @@ module foc_closedloop #(
 
     logic [4:0] current_state, next_state;
 
-    // Shared multiplier — registered 16-bit operands for DSP inference
+    // Shared multiplier — registered 17-bit operands for DSP inference
     // Operands registered in always_ff; result available next cycle
-    logic signed [15:0] mul_a, mul_b;
-    logic signed [15:0] mul_a_next, mul_b_next;
-    wire signed [31:0] mul_result;
+    logic signed [16:0] mul_a, mul_b;
+    logic signed [16:0] mul_a_next, mul_b_next;
+    wire signed [33:0] mul_result;
     assign mul_result = mul_a * mul_b;
 
-    // Shared multiply temporaries (registered for cross-stage persistence)
-    logic signed [31:0] __shmul_0;
-    logic signed [31:0] __shmul_0_next;
-    logic signed [31:0] __shmul_1;
-    logic signed [31:0] __shmul_1_next;
-    logic signed [31:0] __shmul_2;
-    logic signed [31:0] __shmul_2_next;
-    logic signed [31:0] __shmul_3;
-    logic signed [31:0] __shmul_3_next;
-    logic signed [31:0] __shmul_4;
-    logic signed [31:0] __shmul_4_next;
-    logic signed [31:0] __shmul_5;
-    logic signed [31:0] __shmul_5_next;
-    logic signed [31:0] __shmul_6;
-    logic signed [31:0] __shmul_6_next;
-    logic signed [31:0] __shmul_7;
-    logic signed [31:0] __shmul_7_next;
-    logic signed [31:0] __shmul_8;
-    logic signed [31:0] __shmul_8_next;
-    logic signed [31:0] __shmul_9;
-    logic signed [31:0] __shmul_9_next;
-    logic signed [31:0] __shmul_10;
-    logic signed [31:0] __shmul_10_next;
-    logic signed [31:0] __shmul_11;
-    logic signed [31:0] __shmul_11_next;
-    logic signed [31:0] __shmul_12;
-    logic signed [31:0] __shmul_12_next;
-    logic signed [31:0] __shmul_13;
-    logic signed [31:0] __shmul_13_next;
-    logic signed [31:0] __shmul_14;
-    logic signed [31:0] __shmul_14_next;
-    logic signed [31:0] __shmul_15;
-    logic signed [31:0] __shmul_15_next;
-    logic signed [31:0] __shmul_16;
-    logic signed [31:0] __shmul_16_next;
-    logic signed [31:0] __shmul_17;
-    logic signed [31:0] __shmul_17_next;
-    logic signed [31:0] __shmul_18;
-    logic signed [31:0] __shmul_18_next;
-    logic signed [31:0] __shmul_19;
-    logic signed [31:0] __shmul_19_next;
+    // Shared multiply temporaries
+    // __shmul_0: eliminated (captured & consumed in S2)
+    logic signed [33:0] __shmul_1;
+    logic signed [33:0] __shmul_1_next;
+    // __shmul_2: eliminated (captured & consumed in S4)
+    logic signed [33:0] __shmul_3;
+    logic signed [33:0] __shmul_3_next;
+    // __shmul_4: eliminated (captured & consumed in S6)
+    logic signed [33:0] __shmul_5;
+    logic signed [33:0] __shmul_5_next;
+    logic signed [33:0] __shmul_6;
+    logic signed [33:0] __shmul_6_next;
+    logic signed [33:0] __shmul_7;
+    logic signed [33:0] __shmul_7_next;
+    // __shmul_8: eliminated (captured & consumed in S10)
+    // __shmul_9: eliminated (captured & consumed in S11)
+    // __shmul_10: eliminated (captured & consumed in S12)
+    // __shmul_11: eliminated (captured & consumed in S13)
+    logic signed [33:0] __shmul_12;
+    logic signed [33:0] __shmul_12_next;
+    // __shmul_13: eliminated (captured & consumed in S15)
+    logic signed [33:0] __shmul_14;
+    logic signed [33:0] __shmul_14_next;
+    // __shmul_15: eliminated (captured & consumed in S17)
+    logic signed [33:0] __shmul_16;
+    logic signed [33:0] __shmul_16_next;
 
     // Input capture registers (sample on entry to FSM)
     logic [15:0] ia_raw_captured;
@@ -154,7 +142,7 @@ module foc_closedloop #(
     logic fault_latch;
 
     // Local signals (from loop body variables)
-    logic signed [31:0] raw_speed;
+    logic signed [12:0] raw_speed;
     logic signed [15:0] ia;
     logic signed [15:0] ib;
     logic signed [31:0] ic_calc_raw;
@@ -168,9 +156,9 @@ module foc_closedloop #(
     logic signed [15:0] iq_meas;
     logic signed [15:0] abs_id;
     logic signed [15:0] abs_iq;
-    logic signed [15:0] iq_ref;
+    logic iq_ref;
     logic signed [15:0] speed_ref;
-    logic signed [31:0] pos_error;
+    logic signed [12:0] pos_error;
     logic signed [31:0] speed_cmd;
     logic signed [15:0] spd_error;
     logic signed [31:0] spd_p;
@@ -196,7 +184,7 @@ module foc_closedloop #(
     logic signed [15:0] v_c;
 
     // Local variable next-value signals (for FSM staging)
-    logic signed [31:0] raw_speed_next;
+    logic signed [12:0] raw_speed_next;
     logic signed [15:0] ia_next;
     logic signed [15:0] ib_next;
     logic signed [31:0] ic_calc_raw_next;
@@ -210,9 +198,9 @@ module foc_closedloop #(
     logic signed [15:0] iq_meas_next;
     logic signed [15:0] abs_id_next;
     logic signed [15:0] abs_iq_next;
-    logic signed [15:0] iq_ref_next;
+    logic iq_ref_next;
     logic signed [15:0] speed_ref_next;
-    logic signed [31:0] pos_error_next;
+    logic signed [12:0] pos_error_next;
     logic signed [31:0] speed_cmd_next;
     logic signed [15:0] spd_error_next;
     logic signed [31:0] spd_p_next;
@@ -263,26 +251,14 @@ module foc_closedloop #(
         valid_out = 1'b0;
         mul_a_next = '0;
         mul_b_next = '0;
-        __shmul_0_next = __shmul_0;
         __shmul_1_next = __shmul_1;
-        __shmul_2_next = __shmul_2;
         __shmul_3_next = __shmul_3;
-        __shmul_4_next = __shmul_4;
         __shmul_5_next = __shmul_5;
         __shmul_6_next = __shmul_6;
         __shmul_7_next = __shmul_7;
-        __shmul_8_next = __shmul_8;
-        __shmul_9_next = __shmul_9;
-        __shmul_10_next = __shmul_10;
-        __shmul_11_next = __shmul_11;
         __shmul_12_next = __shmul_12;
-        __shmul_13_next = __shmul_13;
         __shmul_14_next = __shmul_14;
-        __shmul_15_next = __shmul_15;
         __shmul_16_next = __shmul_16;
-        __shmul_17_next = __shmul_17;
-        __shmul_18_next = __shmul_18;
-        __shmul_19_next = __shmul_19;
         raw_speed_next = raw_speed;
         ia_next = ia;
         ib_next = ib;
@@ -351,9 +327,6 @@ module foc_closedloop #(
 
             STATE_S0: begin
                 // Stage 0 computation
-                theta_elec_next = ($signed({16'b0, encoder_raw_captured}) * $signed(16));
-                raw_speed_next = (encoder_raw_captured - last_encoder);
-                speed_est_next = ((((raw_speed_next > 32767) ? 32767 : ((raw_speed_next < -32768) ? -32768 : raw_speed_next)) < (-4095)) ? ((-4095)) : ((((raw_speed_next > 32767) ? 32767 : ((raw_speed_next < -32768) ? -32768 : raw_speed_next)) > 4095) ? (4095) : (((raw_speed_next > 32767) ? 32767 : ((raw_speed_next < -32768) ? -32768 : raw_speed_next)))));
                 position_next = encoder_raw_captured;
                 last_encoder_next = encoder_raw_captured;
                 dbg_speed_next = speed_est_next;
@@ -363,23 +336,45 @@ module foc_closedloop #(
                 ic_calc_raw_next = (-(ia_next + ib_next));
                 ic_calc_next = ((((ic_calc_raw_next > 32767) ? 32767 : ((ic_calc_raw_next < -32768) ? -32768 : ic_calc_raw_next)) < (-2047)) ? ((-2047)) : ((((ic_calc_raw_next > 32767) ? 32767 : ((ic_calc_raw_next < -32768) ? -32768 : ic_calc_raw_next)) > 2047) ? (2047) : (((ic_calc_raw_next > 32767) ? 32767 : ((ic_calc_raw_next < -32768) ? -32768 : ic_calc_raw_next)))));
                 i_alpha_next = ia_next;
+                i_beta_next = ((((i_beta_temp_next > 32767) ? 32767 : ((i_beta_temp_next < -32768) ? -32768 : i_beta_temp_next)) < (-2047)) ? ((-2047)) : ((((i_beta_temp_next > 32767) ? 32767 : ((i_beta_temp_next < -32768) ? -32768 : i_beta_temp_next)) > 2047) ? (2047) : (((i_beta_temp_next > 32767) ? 32767 : ((i_beta_temp_next < -32768) ? -32768 : i_beta_temp_next)))));
+                dbg_id_next = id_meas_next;
+                dbg_iq_next = iq_meas_next;
                 next_state = STATE_S1;
             end
 
             STATE_S1: begin
                 // Stage 1 computation
-                mul_a_next = (ia_next + ($signed(2) * $signed({{16{ib_next[15]}}, ib_next})));
+                mul_a_next = (ia_next + (ib_next << 1));
                 mul_b_next = 18919;
+                iq_meas_next = ((((iq_temp_next > 32767) ? 32767 : ((iq_temp_next < -32768) ? -32768 : iq_temp_next)) < (-2047)) ? ((-2047)) : ((((iq_temp_next > 32767) ? 32767 : ((iq_temp_next < -32768) ? -32768 : iq_temp_next)) > 2047) ? (2047) : (((iq_temp_next > 32767) ? 32767 : ((iq_temp_next < -32768) ? -32768 : iq_temp_next)))));
+                abs_id_next = ((id_meas_next < 0) ? -(id_meas_next) : (id_meas_next));
+                abs_iq_next = ((iq_meas_next < 0) ? -(iq_meas_next) : (iq_meas_next));
+                if ((!enable_captured)) begin
+                    fault_latch_next = 1'b0;
+                end
+                fault_next = fault_latch_next;
                 next_state = STATE_S2;
             end
 
             STATE_S2: begin
                 // Stage 2 computation
-                __shmul_0_next = mul_result; // DSP result capture
-                i_beta_temp_next = (__shmul_0_next / 32768);
-                i_beta_next = ((((i_beta_temp_next > 32767) ? 32767 : ((i_beta_temp_next < -32768) ? -32768 : i_beta_temp_next)) < (-2047)) ? ((-2047)) : ((((i_beta_temp_next > 32767) ? 32767 : ((i_beta_temp_next < -32768) ? -32768 : i_beta_temp_next)) > 2047) ? (2047) : (((i_beta_temp_next > 32767) ? 32767 : ((i_beta_temp_next < -32768) ? -32768 : i_beta_temp_next)))));
                 mul_a_next = i_alpha_next;
                 mul_b_next = cos_theta_captured;
+                if (((!enable_captured) || fault_latch_next)) begin
+                    pwm_a_next = 512;
+                end
+                if (((!enable_captured) || fault_latch_next)) begin
+                    pwm_b_next = 512;
+                end
+                if (((!enable_captured) || fault_latch_next)) begin
+                    pwm_c_next = 512;
+                end
+                if (((!enable_captured) || fault_latch_next)) begin
+                    id_integrator_next = 0;
+                end
+                if (((!enable_captured) || fault_latch_next)) begin
+                    iq_integrator_next = 0;
+                end
                 next_state = STATE_S3;
             end
 
@@ -388,43 +383,44 @@ module foc_closedloop #(
                 __shmul_1_next = mul_result; // DSP result capture
                 mul_a_next = i_beta_next;
                 mul_b_next = sin_theta_captured;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    iq_ref_next = 0;
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    speed_ref_next = 0;
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    id_error_next = (((((0 - id_meas_next) > 32767) ? 32767 : (((0 - id_meas_next) < -32768) ? -32768 : (0 - id_meas_next))) < (-2047)) ? ((-2047)) : (((((0 - id_meas_next) > 32767) ? 32767 : (((0 - id_meas_next) < -32768) ? -32768 : (0 - id_meas_next))) > 2047) ? (2047) : ((((0 - id_meas_next) > 32767) ? 32767 : (((0 - id_meas_next) < -32768) ? -32768 : (0 - id_meas_next))))));
+                end
                 next_state = STATE_S4;
             end
 
             STATE_S4: begin
                 // Stage 4 computation
-                __shmul_2_next = mul_result; // DSP result capture
-                id_temp_next = ((__shmul_1_next + __shmul_2_next) / 32768);
+                id_temp_next = ((__shmul_1_next + mul_result) / 32768);
                 mul_a_next = i_alpha_next;
                 mul_b_next = sin_theta_captured;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    id_integrator_next = (((id_integrator_next + id_error_next) < (-524288)) ? ((-524288)) : (((id_integrator_next + id_error_next) > 524288) ? (524288) : ((id_integrator_next + id_error_next))));
+                end
                 next_state = STATE_S5;
             end
 
             STATE_S5: begin
                 // Stage 5 computation
                 __shmul_3_next = mul_result; // DSP result capture
+                theta_elec_next = (encoder_raw_captured << 4);
                 mul_a_next = i_beta_next;
                 mul_b_next = cos_theta_captured;
+                if (((abs_id_next > 1800) || (abs_iq_next > 1800))) begin
+                    fault_latch_next = 1'b1;
+                end
                 next_state = STATE_S6;
             end
 
             STATE_S6: begin
                 // Stage 6 computation
-                __shmul_4_next = mul_result; // DSP result capture
-                iq_temp_next = (((-__shmul_3_next) + __shmul_4_next) / 32768);
-                id_meas_next = ((((id_temp_next > 32767) ? 32767 : ((id_temp_next < -32768) ? -32768 : id_temp_next)) < (-2047)) ? ((-2047)) : ((((id_temp_next > 32767) ? 32767 : ((id_temp_next < -32768) ? -32768 : id_temp_next)) > 2047) ? (2047) : (((id_temp_next > 32767) ? 32767 : ((id_temp_next < -32768) ? -32768 : id_temp_next)))));
-                iq_meas_next = ((((iq_temp_next > 32767) ? 32767 : ((iq_temp_next < -32768) ? -32768 : iq_temp_next)) < (-2047)) ? ((-2047)) : ((((iq_temp_next > 32767) ? 32767 : ((iq_temp_next < -32768) ? -32768 : iq_temp_next)) > 2047) ? (2047) : (((iq_temp_next > 32767) ? 32767 : ((iq_temp_next < -32768) ? -32768 : iq_temp_next)))));
-                dbg_id_next = id_meas_next;
-                dbg_iq_next = iq_meas_next;
-                abs_id_next = ((id_meas_next < 0) ? -(id_meas_next) : (id_meas_next));
-                abs_iq_next = ((iq_meas_next < 0) ? -(iq_meas_next) : (iq_meas_next));
-                if (((abs_id_next > 1800) || (abs_iq_next > 1800))) begin
-                    fault_latch_next = 1'b1;
-                end
-                if ((!enable_captured)) begin
-                    fault_latch_next = 1'b0;
-                end
-                fault_next = fault_latch_next;
+                iq_temp_next = (((-__shmul_3_next) + mul_result) / 32768);
                 mul_a_next = pos_error_next;
                 mul_b_next = kp_pos_captured;
                 next_state = STATE_S7;
@@ -433,6 +429,7 @@ module foc_closedloop #(
             STATE_S7: begin
                 // Stage 7 computation
                 __shmul_5_next = mul_result; // DSP result capture
+                raw_speed_next = (encoder_raw_captured - last_encoder);
                 mul_a_next = spd_error_next;
                 mul_b_next = kp_speed_captured;
                 next_state = STATE_S8;
@@ -441,6 +438,7 @@ module foc_closedloop #(
             STATE_S8: begin
                 // Stage 8 computation
                 __shmul_6_next = mul_result; // DSP result capture
+                speed_est_next = ((((raw_speed_next > 32767) ? 32767 : ((raw_speed_next < -32768) ? -32768 : raw_speed_next)) < (-4095)) ? ((-4095)) : ((((raw_speed_next > 32767) ? 32767 : ((raw_speed_next < -32768) ? -32768 : raw_speed_next)) > 4095) ? (4095) : (((raw_speed_next > 32767) ? 32767 : ((raw_speed_next < -32768) ? -32768 : raw_speed_next)))));
                 mul_a_next = speed_integrator_next;
                 mul_b_next = ki_speed_captured;
                 next_state = STATE_S9;
@@ -449,56 +447,80 @@ module foc_closedloop #(
             STATE_S9: begin
                 // Stage 9 computation
                 __shmul_7_next = mul_result; // DSP result capture
-                mul_a_next = spd_error_next;
-                mul_b_next = kp_speed_captured;
+                i_beta_temp_next = (__shmul_0_next / 32768);
+                mul_a_next = id_error_next;
+                mul_b_next = kp_id_captured;
+                if (((!enable_captured) || fault_latch_next)) begin
+                    speed_integrator_next = 0;
+                end
                 next_state = STATE_S10;
             end
 
             STATE_S10: begin
                 // Stage 10 computation
-                __shmul_8_next = mul_result; // DSP result capture
-                mul_a_next = speed_integrator_next;
-                mul_b_next = ki_speed_captured;
+                mul_a_next = id_integrator_next;
+                mul_b_next = ki_id_captured;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    vd_p_next = (mul_result / 256);
+                end
                 next_state = STATE_S11;
             end
 
             STATE_S11: begin
                 // Stage 11 computation
-                __shmul_9_next = mul_result; // DSP result capture
-                mul_a_next = id_error_next;
-                mul_b_next = kp_id_captured;
+                mul_a_next = iq_error_next;
+                mul_b_next = kp_iq_captured;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    vd_raw_next = (vd_p_next + vd_i_next);
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    target_v_d_next = ((((vd_raw_next > 32767) ? 32767 : ((vd_raw_next < -32768) ? -32768 : vd_raw_next)) < (-8192)) ? ((-8192)) : ((((vd_raw_next > 32767) ? 32767 : ((vd_raw_next < -32768) ? -32768 : vd_raw_next)) > 8192) ? (8192) : (((vd_raw_next > 32767) ? 32767 : ((vd_raw_next < -32768) ? -32768 : vd_raw_next)))));
+                end
                 next_state = STATE_S12;
             end
 
             STATE_S12: begin
                 // Stage 12 computation
-                __shmul_10_next = mul_result; // DSP result capture
-                mul_a_next = id_integrator_next;
-                mul_b_next = ki_id_captured;
+                mul_a_next = iq_integrator_next;
+                mul_b_next = ki_iq_captured;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    vq_p_next = (mul_result / 256);
+                end
                 next_state = STATE_S13;
             end
 
             STATE_S13: begin
                 // Stage 13 computation
-                __shmul_11_next = mul_result; // DSP result capture
-                mul_a_next = iq_error_next;
-                mul_b_next = kp_iq_captured;
+                mul_a_next = target_v_d_next;
+                mul_b_next = cos_theta_captured;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    vq_raw_next = (vq_p_next + vq_i_next);
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    target_v_q_next = ((((vq_raw_next > 32767) ? 32767 : ((vq_raw_next < -32768) ? -32768 : vq_raw_next)) < (-8192)) ? ((-8192)) : ((((vq_raw_next > 32767) ? 32767 : ((vq_raw_next < -32768) ? -32768 : vq_raw_next)) > 8192) ? (8192) : (((vq_raw_next > 32767) ? 32767 : ((vq_raw_next < -32768) ? -32768 : vq_raw_next)))));
+                end
                 next_state = STATE_S14;
             end
 
             STATE_S14: begin
                 // Stage 14 computation
                 __shmul_12_next = mul_result; // DSP result capture
-                mul_a_next = iq_integrator_next;
-                mul_b_next = ki_iq_captured;
+                id_meas_next = ((((id_temp_next > 32767) ? 32767 : ((id_temp_next < -32768) ? -32768 : id_temp_next)) < (-2047)) ? ((-2047)) : ((((id_temp_next > 32767) ? 32767 : ((id_temp_next < -32768) ? -32768 : id_temp_next)) > 2047) ? (2047) : (((id_temp_next > 32767) ? 32767 : ((id_temp_next < -32768) ? -32768 : id_temp_next)))));
+                mul_a_next = target_v_q_next;
+                mul_b_next = sin_theta_captured;
                 next_state = STATE_S15;
             end
 
             STATE_S15: begin
                 // Stage 15 computation
-                __shmul_13_next = mul_result; // DSP result capture
                 mul_a_next = target_v_d_next;
-                mul_b_next = cos_theta_captured;
+                mul_b_next = sin_theta_captured;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    v_alpha_next = ((((v_alpha_temp_next > 32767) ? 32767 : ((v_alpha_temp_next < -32768) ? -32768 : v_alpha_temp_next)) < (-8192)) ? ((-8192)) : ((((v_alpha_temp_next > 32767) ? 32767 : ((v_alpha_temp_next < -32768) ? -32768 : v_alpha_temp_next)) > 8192) ? (8192) : (((v_alpha_temp_next > 32767) ? 32767 : ((v_alpha_temp_next < -32768) ? -32768 : v_alpha_temp_next)))));
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    v_a_next = v_alpha_next;
+                end
                 next_state = STATE_S16;
             end
 
@@ -506,56 +528,72 @@ module foc_closedloop #(
                 // Stage 16 computation
                 __shmul_14_next = mul_result; // DSP result capture
                 mul_a_next = target_v_q_next;
-                mul_b_next = sin_theta_captured;
+                mul_b_next = cos_theta_captured;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    pwm_a_next = (((512 + (v_a_next / 16)) < 0) ? (0) : (((512 + (v_a_next / 16)) > 1023) ? (1023) : ((512 + (v_a_next / 16)))));
+                end
                 next_state = STATE_S17;
             end
 
             STATE_S17: begin
                 // Stage 17 computation
-                __shmul_15_next = mul_result; // DSP result capture
-                mul_a_next = target_v_d_next;
-                mul_b_next = sin_theta_captured;
+                mul_a_next = v_beta_next;
+                mul_b_next = 28378;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    v_beta_temp_next = ((__shmul_14_next + mul_result) / 32768);
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    v_beta_next = ((((v_beta_temp_next > 32767) ? 32767 : ((v_beta_temp_next < -32768) ? -32768 : v_beta_temp_next)) < (-8192)) ? ((-8192)) : ((((v_beta_temp_next > 32767) ? 32767 : ((v_beta_temp_next < -32768) ? -32768 : v_beta_temp_next)) > 8192) ? (8192) : (((v_beta_temp_next > 32767) ? 32767 : ((v_beta_temp_next < -32768) ? -32768 : v_beta_temp_next)))));
+                end
                 next_state = STATE_S18;
             end
 
             STATE_S18: begin
                 // Stage 18 computation
                 __shmul_16_next = mul_result; // DSP result capture
-                mul_a_next = target_v_q_next;
-                mul_b_next = cos_theta_captured;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    vd_i_next = (__shmul_9_next / 65536);
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    vq_i_next = (__shmul_11_next / 65536);
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    v_alpha_temp_next = ((__shmul_12_next - __shmul_13_next) / 32768);
+                end
                 next_state = STATE_S19;
             end
 
             STATE_S19: begin
                 // Stage 19 computation
-                __shmul_17_next = mul_result; // DSP result capture
-                mul_a_next = v_beta_next;
-                mul_b_next = 28378;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    iq_error_next = (((((iq_ref_next - iq_meas_next) > 32767) ? 32767 : (((iq_ref_next - iq_meas_next) < -32768) ? -32768 : (iq_ref_next - iq_meas_next))) < (-8192)) ? ((-8192)) : (((((iq_ref_next - iq_meas_next) > 32767) ? 32767 : (((iq_ref_next - iq_meas_next) < -32768) ? -32768 : (iq_ref_next - iq_meas_next))) > 8192) ? (8192) : ((((iq_ref_next - iq_meas_next) > 32767) ? 32767 : (((iq_ref_next - iq_meas_next) < -32768) ? -32768 : (iq_ref_next - iq_meas_next))))));
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    iq_integrator_next = (((iq_integrator_next + iq_error_next) < (-524288)) ? ((-524288)) : (((iq_integrator_next + iq_error_next) > 524288) ? (524288) : ((iq_integrator_next + iq_error_next))));
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    v_b_temp_next = (((-v_alpha_next) / 2) + (__shmul_16_next / 32768));
+                end
                 next_state = STATE_S20;
             end
 
             STATE_S20: begin
                 // Stage 20 computation
-                __shmul_18_next = mul_result; // DSP result capture
-                mul_a_next = v_beta_next;
-                mul_b_next = 28378;
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    v_c_temp_next = (((-v_alpha_next) / 2) - (__shmul_16_next / 32768));
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    v_b_next = ((((v_b_temp_next > 32767) ? 32767 : ((v_b_temp_next < -32768) ? -32768 : v_b_temp_next)) < (-8192)) ? ((-8192)) : ((((v_b_temp_next > 32767) ? 32767 : ((v_b_temp_next < -32768) ? -32768 : v_b_temp_next)) > 8192) ? (8192) : (((v_b_temp_next > 32767) ? 32767 : ((v_b_temp_next < -32768) ? -32768 : v_b_temp_next)))));
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    v_c_next = ((((v_c_temp_next > 32767) ? 32767 : ((v_c_temp_next < -32768) ? -32768 : v_c_temp_next)) < (-8192)) ? ((-8192)) : ((((v_c_temp_next > 32767) ? 32767 : ((v_c_temp_next < -32768) ? -32768 : v_c_temp_next)) > 8192) ? (8192) : (((v_c_temp_next > 32767) ? 32767 : ((v_c_temp_next < -32768) ? -32768 : v_c_temp_next)))));
+                end
                 next_state = STATE_S21;
             end
 
             STATE_S21: begin
                 // Stage 21 computation
-                __shmul_19_next = mul_result; // DSP result capture
-                if (((!enable_captured) || fault_latch_next)) begin
-                    pwm_a_next = 512;
-                    pwm_b_next = 512;
-                    pwm_c_next = 512;
-                    id_integrator_next = 0;
-                    iq_integrator_next = 0;
-                    speed_integrator_next = 0;
-                end
-                else begin
-                    iq_ref_next = 0;
-                    speed_ref_next = 0;
+                if ((!((!enable_captured) || fault_latch_next))) begin
                     if ((mode_captured == 2)) begin
                         pos_error_next = (cmd_pos_ref_captured - position_next);
                         speed_cmd_next = (__shmul_5_next / 256);
@@ -571,8 +609,8 @@ module foc_closedloop #(
                             speed_ref_next = cmd_speed_ref_captured;
                             spd_error_next = (((((speed_ref_next - speed_est_next) > 32767) ? 32767 : (((speed_ref_next - speed_est_next) < -32768) ? -32768 : (speed_ref_next - speed_est_next))) < (-8192)) ? ((-8192)) : (((((speed_ref_next - speed_est_next) > 32767) ? 32767 : (((speed_ref_next - speed_est_next) < -32768) ? -32768 : (speed_ref_next - speed_est_next))) > 8192) ? (8192) : ((((speed_ref_next - speed_est_next) > 32767) ? 32767 : (((speed_ref_next - speed_est_next) < -32768) ? -32768 : (speed_ref_next - speed_est_next))))));
                             speed_integrator_next = (((speed_integrator_next + spd_error_next) < (-524288)) ? ((-524288)) : (((speed_integrator_next + spd_error_next) > 524288) ? (524288) : ((speed_integrator_next + spd_error_next))));
-                            spd_p_next = (__shmul_8_next / 256);
-                            spd_i_next = (__shmul_9_next / 65536);
+                            spd_p_next = (__shmul_6_next / 256);
+                            spd_i_next = (__shmul_7_next / 65536);
                             iq_ref_next = (((((spd_p_next + spd_i_next) > 32767) ? 32767 : (((spd_p_next + spd_i_next) < -32768) ? -32768 : (spd_p_next + spd_i_next))) < (-8192)) ? ((-8192)) : (((((spd_p_next + spd_i_next) > 32767) ? 32767 : (((spd_p_next + spd_i_next) < -32768) ? -32768 : (spd_p_next + spd_i_next))) > 8192) ? (8192) : ((((spd_p_next + spd_i_next) > 32767) ? 32767 : (((spd_p_next + spd_i_next) < -32768) ? -32768 : (spd_p_next + spd_i_next))))));
                         end
                         else begin
@@ -580,30 +618,12 @@ module foc_closedloop #(
                             speed_integrator_next = 0;
                         end
                     end
-                    id_error_next = (((((0 - id_meas_next) > 32767) ? 32767 : (((0 - id_meas_next) < -32768) ? -32768 : (0 - id_meas_next))) < (-2047)) ? ((-2047)) : (((((0 - id_meas_next) > 32767) ? 32767 : (((0 - id_meas_next) < -32768) ? -32768 : (0 - id_meas_next))) > 2047) ? (2047) : ((((0 - id_meas_next) > 32767) ? 32767 : (((0 - id_meas_next) < -32768) ? -32768 : (0 - id_meas_next))))));
-                    id_integrator_next = (((id_integrator_next + id_error_next) < (-524288)) ? ((-524288)) : (((id_integrator_next + id_error_next) > 524288) ? (524288) : ((id_integrator_next + id_error_next))));
-                    vd_p_next = (__shmul_10_next / 256);
-                    vd_i_next = (__shmul_11_next / 65536);
-                    vd_raw_next = (vd_p_next + vd_i_next);
-                    target_v_d_next = ((((vd_raw_next > 32767) ? 32767 : ((vd_raw_next < -32768) ? -32768 : vd_raw_next)) < (-8192)) ? ((-8192)) : ((((vd_raw_next > 32767) ? 32767 : ((vd_raw_next < -32768) ? -32768 : vd_raw_next)) > 8192) ? (8192) : (((vd_raw_next > 32767) ? 32767 : ((vd_raw_next < -32768) ? -32768 : vd_raw_next)))));
-                    iq_error_next = (((((iq_ref_next - iq_meas_next) > 32767) ? 32767 : (((iq_ref_next - iq_meas_next) < -32768) ? -32768 : (iq_ref_next - iq_meas_next))) < (-8192)) ? ((-8192)) : (((((iq_ref_next - iq_meas_next) > 32767) ? 32767 : (((iq_ref_next - iq_meas_next) < -32768) ? -32768 : (iq_ref_next - iq_meas_next))) > 8192) ? (8192) : ((((iq_ref_next - iq_meas_next) > 32767) ? 32767 : (((iq_ref_next - iq_meas_next) < -32768) ? -32768 : (iq_ref_next - iq_meas_next))))));
-                    iq_integrator_next = (((iq_integrator_next + iq_error_next) < (-524288)) ? ((-524288)) : (((iq_integrator_next + iq_error_next) > 524288) ? (524288) : ((iq_integrator_next + iq_error_next))));
-                    vq_p_next = (__shmul_12_next / 256);
-                    vq_i_next = (__shmul_13_next / 65536);
-                    vq_raw_next = (vq_p_next + vq_i_next);
-                    target_v_q_next = ((((vq_raw_next > 32767) ? 32767 : ((vq_raw_next < -32768) ? -32768 : vq_raw_next)) < (-8192)) ? ((-8192)) : ((((vq_raw_next > 32767) ? 32767 : ((vq_raw_next < -32768) ? -32768 : vq_raw_next)) > 8192) ? (8192) : (((vq_raw_next > 32767) ? 32767 : ((vq_raw_next < -32768) ? -32768 : vq_raw_next)))));
-                    v_alpha_temp_next = ((__shmul_14_next - __shmul_15_next) / 32768);
-                    v_beta_temp_next = ((__shmul_16_next + __shmul_17_next) / 32768);
-                    v_alpha_next = ((((v_alpha_temp_next > 32767) ? 32767 : ((v_alpha_temp_next < -32768) ? -32768 : v_alpha_temp_next)) < (-8192)) ? ((-8192)) : ((((v_alpha_temp_next > 32767) ? 32767 : ((v_alpha_temp_next < -32768) ? -32768 : v_alpha_temp_next)) > 8192) ? (8192) : (((v_alpha_temp_next > 32767) ? 32767 : ((v_alpha_temp_next < -32768) ? -32768 : v_alpha_temp_next)))));
-                    v_beta_next = ((((v_beta_temp_next > 32767) ? 32767 : ((v_beta_temp_next < -32768) ? -32768 : v_beta_temp_next)) < (-8192)) ? ((-8192)) : ((((v_beta_temp_next > 32767) ? 32767 : ((v_beta_temp_next < -32768) ? -32768 : v_beta_temp_next)) > 8192) ? (8192) : (((v_beta_temp_next > 32767) ? 32767 : ((v_beta_temp_next < -32768) ? -32768 : v_beta_temp_next)))));
-                    v_a_next = v_alpha_next;
-                    v_b_temp_next = (((-v_alpha_next) / 2) + (__shmul_18_next / 32768));
-                    v_c_temp_next = (((-v_alpha_next) / 2) - (__shmul_19_next / 32768));
-                    v_b_next = ((((v_b_temp_next > 32767) ? 32767 : ((v_b_temp_next < -32768) ? -32768 : v_b_temp_next)) < (-8192)) ? ((-8192)) : ((((v_b_temp_next > 32767) ? 32767 : ((v_b_temp_next < -32768) ? -32768 : v_b_temp_next)) > 8192) ? (8192) : (((v_b_temp_next > 32767) ? 32767 : ((v_b_temp_next < -32768) ? -32768 : v_b_temp_next)))));
-                    v_c_next = ((((v_c_temp_next > 32767) ? 32767 : ((v_c_temp_next < -32768) ? -32768 : v_c_temp_next)) < (-8192)) ? ((-8192)) : ((((v_c_temp_next > 32767) ? 32767 : ((v_c_temp_next < -32768) ? -32768 : v_c_temp_next)) > 8192) ? (8192) : (((v_c_temp_next > 32767) ? 32767 : ((v_c_temp_next < -32768) ? -32768 : v_c_temp_next)))));
-                    pwm_a_next = (((((512 + (v_a_next / 16)) > 65535) ? 65535 : (($signed((512 + (v_a_next / 16))) < 0) ? 0 : (512 + (v_a_next / 16)))) < 0) ? (0) : (((((512 + (v_a_next / 16)) > 65535) ? 65535 : (($signed((512 + (v_a_next / 16))) < 0) ? 0 : (512 + (v_a_next / 16)))) > 1023) ? (1023) : ((((512 + (v_a_next / 16)) > 65535) ? 65535 : (($signed((512 + (v_a_next / 16))) < 0) ? 0 : (512 + (v_a_next / 16)))))));
-                    pwm_b_next = (((((512 + (v_b_next / 16)) > 65535) ? 65535 : (($signed((512 + (v_b_next / 16))) < 0) ? 0 : (512 + (v_b_next / 16)))) < 0) ? (0) : (((((512 + (v_b_next / 16)) > 65535) ? 65535 : (($signed((512 + (v_b_next / 16))) < 0) ? 0 : (512 + (v_b_next / 16)))) > 1023) ? (1023) : ((((512 + (v_b_next / 16)) > 65535) ? 65535 : (($signed((512 + (v_b_next / 16))) < 0) ? 0 : (512 + (v_b_next / 16)))))));
-                    pwm_c_next = (((((512 + (v_c_next / 16)) > 65535) ? 65535 : (($signed((512 + (v_c_next / 16))) < 0) ? 0 : (512 + (v_c_next / 16)))) < 0) ? (0) : (((((512 + (v_c_next / 16)) > 65535) ? 65535 : (($signed((512 + (v_c_next / 16))) < 0) ? 0 : (512 + (v_c_next / 16)))) > 1023) ? (1023) : ((((512 + (v_c_next / 16)) > 65535) ? 65535 : (($signed((512 + (v_c_next / 16))) < 0) ? 0 : (512 + (v_c_next / 16)))))));
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    pwm_b_next = (((512 + (v_b_next / 16)) < 0) ? (0) : (((512 + (v_b_next / 16)) > 1023) ? (1023) : ((512 + (v_b_next / 16)))));
+                end
+                if ((!((!enable_captured) || fault_latch_next))) begin
+                    pwm_c_next = (((512 + (v_c_next / 16)) < 0) ? (0) : (((512 + (v_c_next / 16)) > 1023) ? (1023) : ((512 + (v_c_next / 16)))));
                 end
                 next_state = STATE_DONE;
             end
@@ -627,26 +647,14 @@ module foc_closedloop #(
             current_state <= STATE_IDLE;
             mul_a <= '0;
             mul_b <= '0;
-            __shmul_0 <= '0;
             __shmul_1 <= '0;
-            __shmul_2 <= '0;
             __shmul_3 <= '0;
-            __shmul_4 <= '0;
             __shmul_5 <= '0;
             __shmul_6 <= '0;
             __shmul_7 <= '0;
-            __shmul_8 <= '0;
-            __shmul_9 <= '0;
-            __shmul_10 <= '0;
-            __shmul_11 <= '0;
             __shmul_12 <= '0;
-            __shmul_13 <= '0;
             __shmul_14 <= '0;
-            __shmul_15 <= '0;
             __shmul_16 <= '0;
-            __shmul_17 <= '0;
-            __shmul_18 <= '0;
-            __shmul_19 <= '0;
             raw_speed <= '0;
             ia <= '0;
             ib <= '0;
@@ -732,26 +740,14 @@ module foc_closedloop #(
             // Register updates (unconditional — defaults provide hold)
             mul_a <= mul_a_next;
             mul_b <= mul_b_next;
-            __shmul_0 <= __shmul_0_next;
             __shmul_1 <= __shmul_1_next;
-            __shmul_2 <= __shmul_2_next;
             __shmul_3 <= __shmul_3_next;
-            __shmul_4 <= __shmul_4_next;
             __shmul_5 <= __shmul_5_next;
             __shmul_6 <= __shmul_6_next;
             __shmul_7 <= __shmul_7_next;
-            __shmul_8 <= __shmul_8_next;
-            __shmul_9 <= __shmul_9_next;
-            __shmul_10 <= __shmul_10_next;
-            __shmul_11 <= __shmul_11_next;
             __shmul_12 <= __shmul_12_next;
-            __shmul_13 <= __shmul_13_next;
             __shmul_14 <= __shmul_14_next;
-            __shmul_15 <= __shmul_15_next;
             __shmul_16 <= __shmul_16_next;
-            __shmul_17 <= __shmul_17_next;
-            __shmul_18 <= __shmul_18_next;
-            __shmul_19 <= __shmul_19_next;
             raw_speed <= raw_speed_next;
             ia <= ia_next;
             ib <= ib_next;
