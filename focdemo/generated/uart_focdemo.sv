@@ -236,39 +236,43 @@ module uart_focdemo (
                 end
 
                 // ---------------------------------------------------------
-                // START: wait until sample tick 8 (centre of start bit),
-                // verify the line is still low.  If high, it was a glitch.
+                // START: verify start bit at mid-bit (tick 7) for glitch
+                // rejection, then wait until tick 15 (end of start bit)
+                // so RX_DATA windows align with actual data-bit boundaries.
                 // ---------------------------------------------------------
                 RX_START: begin
                     if (rx_sample_tick) begin
                         rx_tick_cnt <= rx_tick_cnt + 1'b1;
                         if (rx_tick_cnt == 4'd7) begin
+                            // Mid-start-bit glitch check
                             if (rx_sync == 1'b1) begin
                                 rx_state <= RX_IDLE;
-                            end else begin
-                                rx_bit_idx  <= 3'd0;
-                                rx_shift    <= 8'd0;
-                                rx_vote_acc <= 2'd0;
-                                rx_tick_cnt <= 4'd0;
-                                rx_state    <= RX_DATA;
                             end
+                        end else if (rx_tick_cnt == 4'd15) begin
+                            // Full start bit consumed — enter DATA aligned
+                            rx_bit_idx  <= 3'd0;
+                            rx_shift    <= 8'd0;
+                            rx_vote_acc <= 2'd0;
+                            rx_tick_cnt <= 4'd0;
+                            rx_state    <= RX_DATA;
                         end
                     end
                 end
 
                 // ---------------------------------------------------------
                 // DATA: collect 8 data bits, LSB first
-                // Majority vote on sample ticks 5, 6, 7 (centre triplet)
+                // Majority vote on sample ticks 6, 7, 8 (centre triplet)
+                // Latch at tick 15 (full baud period per bit)
                 // ---------------------------------------------------------
                 RX_DATA: begin
                     if (rx_sample_tick) begin
                         rx_tick_cnt <= rx_tick_cnt + 1'b1;
 
-                        if (rx_tick_cnt == 4'd5 || rx_tick_cnt == 4'd6 || rx_tick_cnt == 4'd7) begin
+                        if (rx_tick_cnt == 4'd6 || rx_tick_cnt == 4'd7 || rx_tick_cnt == 4'd8) begin
                             rx_vote_acc <= rx_vote_acc + {1'b0, rx_sync};
                         end
 
-                        if (rx_tick_cnt == 4'd7) begin
+                        if (rx_tick_cnt == 4'd15) begin
                             rx_shift    <= {(rx_vote_acc >= 2'd2 ? 1'b1 : 1'b0), rx_shift[7:1]};
                             rx_vote_acc <= 2'd0;
                             rx_tick_cnt <= 4'd0;
@@ -283,12 +287,12 @@ module uart_focdemo (
                 end
 
                 // ---------------------------------------------------------
-                // STOP: sample at tick 8 of stop bit; pulse rx_valid if high
+                // STOP: sample at mid-bit of stop bit; pulse rx_valid if high
                 // ---------------------------------------------------------
                 RX_STOP: begin
                     if (rx_sample_tick) begin
                         rx_tick_cnt <= rx_tick_cnt + 1'b1;
-                        if (rx_tick_cnt == 4'd7) begin
+                        if (rx_tick_cnt == 4'd8) begin
                             if (rx_sync == 1'b1) begin
                                 rx_data_reg  <= rx_shift;
                                 rx_valid_reg <= 1'b1;

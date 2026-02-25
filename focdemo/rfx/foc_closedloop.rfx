@@ -4,8 +4,10 @@
 // motor drive.  All arithmetic is Q15 fixed-point (scale = 32768).
 //
 // Signal chain per cycle:
-//   ADC currents -> Clarke -> Park -> current PI (id/iq)
+//   encoder -> sin/cos LUT -> ADC currents -> Clarke -> Park -> current PI (id/iq)
 //   -> (mode-select outer loop) -> inv-Park -> inv-Clarke -> PWM
+//
+// Sin/cos are computed internally using built-in trig LUTs (no external LUT module).
 //
 // Outer loop modes (input: mode):
 //   0 = Torque : iq_ref = cmd_iq_ref   (current loop only)
@@ -17,17 +19,17 @@
 // Constants:
 //   INV_SQRT3_Q15 = 18919  (1/sqrt(3) * 32768, used in Clarke)
 //   SQRT3_OVER_2_Q15 = 28378  (sqrt(3)/2 * 32768, used in inverse Clarke)
+//   TWO_PI_INT = 6, TWO_PI_FRAC = 18559  (2*pi in Q16.16, split to avoid overflow)
 //
 // ADC / encoder conventions:
 //   ia_raw, ib_raw, ic_raw  : u16 in 0..4095, midpoint = 2048 (bipolar)
 //   encoder_raw             : u16 in 0..4095  (absolute position over one electrical rev)
 //   theta_elec = encoder_raw * 16   (maps 0-4095 -> 0-65535)
-//   cos_theta, sin_theta     : Q15 i16, sourced from external sincos_lut keyed by theta_elec
 //
 // Fault condition:  |id| > 1800  OR  |iq| > 1800  (raw ADC-derived, pre-scaled)
 // Safe (coasting) outputs: pwm_a = pwm_b = pwm_c = 512  (50 % duty, no active drive)
 
-reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl_mode(fsm), hdl_backpressure(true)) {
+reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl_mode(fsm), hdl_dsps(4), hdl_backpressure(true), hdl_bram_luts(true)) {
 
   // ------------------------------------------------------------------
   // INPUTS
@@ -36,8 +38,6 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
           ib_raw:        u16,   // Phase B ADC reading (0-4095)
           ic_raw:        u16,   // Phase C ADC reading (0-4095, redundant – used for fault check)
           encoder_raw:   u16,   // Encoder ADC reading (0-4095)
-          cos_theta:     i16,   // cos(theta_elec) from sincos LUT, Q15
-          sin_theta:     i16,   // sin(theta_elec) from sincos LUT, Q15
           enable:        bool,  // Drive enable (false -> coast)
           mode:          u8,    // 0=torque, 1=speed, 2=position
           cmd_iq_ref:    i16,   // Torque-mode iq reference (Q15 units)
@@ -57,7 +57,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
   output: pwm_a:     u16,   // Phase A PWM duty cycle (0-1023)
           pwm_b:     u16,   // Phase B PWM duty cycle (0-1023)
           pwm_c:     u16,   // Phase C PWM duty cycle (0-1023)
-          theta_elec: u16,  // Electrical angle for sincos LUT (0-65535)
+          theta_elec: u16,  // Electrical angle for debug (0-65535)
           fault:     bool,  // Overcurrent fault latch
           dbg_id:    i16,   // Debug: d-axis current (Q15)
           dbg_iq:    i16,   // Debug: q-axis current (Q15)
@@ -84,8 +84,6 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       ib_raw      in 0..4095,
       ic_raw      in 0..4095,
       encoder_raw in 0..4095,
-      cos_theta   in -32768..32767,
-      sin_theta   in -32768..32767,
       enable      in { true, false },
       mode        in 0..2,
       cmd_iq_ref    in -8192..8192,
@@ -135,13 +133,26 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
   loop {
 
     // ================================================================
-    // STEP 1 – Update electrical angle for sincos LUT
+    // STEP 1 – Compute electrical angle and sin/cos via built-in LUT
     // ================================================================
     // Maps encoder_raw 0-4095 to theta_elec 0-65535 (multiply by 16).
-    // Output is consumed by the external sincos_lut this cycle so that
-    // cos_theta / sin_theta are valid on the *next* call; here we use
-    // the values that were already computed from the *previous* theta_elec.
-    theta_elec = encoder_raw * 16
+    let angle: i32 = encoder_raw * 16
+    theta_elec = clamp(i32_to_u16(angle), 0, 65535)
+
+    // Convert theta_elec (0-65535 = 0..2*pi) to Q16.16 radians.
+    // 2*pi in Q16.16 = 411775 = 6*65536 + 18559.
+    // Split multiply to avoid i32 overflow:
+    //   theta_rad = angle * 6 + (angle * 18559) / 65536
+    let theta_frac: i32 = (angle * 18559) / 65536
+    let theta_rad: i32 = (angle * 6) + theta_frac
+
+    // Built-in sin/cos LUT: input Q16.16 radians, output Q16.16 (-65536..65536)
+    let raw_cos: i32 = cos(theta_rad)
+    let raw_sin: i32 = sin(theta_rad)
+
+    // Scale Q16.16 -> Q15 (divide by 2) for compatibility with existing arithmetic
+    let cos_theta: i16 = clamp(i32_to_i16(raw_cos / 2), -32768, 32767)
+    let sin_theta: i16 = clamp(i32_to_i16(raw_sin / 2), -32768, 32767)
 
     // ================================================================
     // STEP 2 – Speed and position estimation
@@ -158,7 +169,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     dbg_pos   = position
 
     // ================================================================
-    // STEP 3 – ADC current conversion  (0-4095 -> ±2047, centered)
+    // STEP 3 – ADC current conversion  (0-4095 -> +-2047, centered)
     // ================================================================
     let ia: i16 = clamp(i32_to_i16(ia_raw - 2048), -2047, 2047)
     let ib: i16 = clamp(i32_to_i16(ib_raw - 2048), -2047, 2047)
@@ -192,7 +203,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
 
     // ================================================================
     // STEP 6 – Overcurrent fault detection (latching via state)
-    // Fault if either axis current exceeds ±1800 (in ADC-scaled units)
+    // Fault if either axis current exceeds +-1800 (in ADC-scaled units)
     // ================================================================
     let abs_id: i16 = abs(id_meas)
     let abs_iq: i16 = abs(iq_meas)
@@ -299,7 +310,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
 
       // ==============================================================
       // STEP 12 – PWM conversion
-      // Centre = 512, full-scale voltage ±8192 maps to ±512 counts
+      // Centre = 512, full-scale voltage +-8192 maps to +-512 counts
       // Divide by 16 to scale: 8192/16 = 512
       // ==============================================================
       pwm_a = clamp(i32_to_u16(512 + (v_a / 16)), 0, 1023)
@@ -319,7 +330,6 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 0,
-        cos_theta = 32767, sin_theta = 0,
         enable = false, mode = 0,
         cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
         kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
@@ -335,7 +345,6 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 0,
-        cos_theta = 32767, sin_theta = 0,
         enable = true, mode = 0,
         cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
         kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
@@ -344,16 +353,13 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       expect: { pwm_a = 512, pwm_b = 512, pwm_c = 512, fault = false }
 
     // Test 3 – Overcurrent on d-axis trips fault and forces coast
-    // ia_raw = 4000 -> ia = 1952; ib_raw = 2048 -> ib = 0
-    // i_alpha = 1952, i_beta ~ 0
-    // With cos=32767, sin=0: id ~ 1952 > 1800 -> fault
+    // ia_raw = 3900 -> ia = 1852; with cos(0)~32767, sin(0)~0: id ~ 1852 > 1800 -> fault
     test fault_on_overcurrent
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
                last_encoder = 0, position = 0, speed_est = 0 },
       inputs: {
         ia_raw = 3900, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 0,
-        cos_theta = 32767, sin_theta = 0,
         enable = true, mode = 0,
         cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
         kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
@@ -369,7 +375,6 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 0,
-        cos_theta = 32767, sin_theta = 0,
         enable = false, mode = 0,
         cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
         kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
@@ -384,7 +389,6 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 100,
-        cos_theta = 32767, sin_theta = 0,
         enable = true, mode = 1,
         cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
         kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
@@ -399,7 +403,6 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 200,
-        cos_theta = 32767, sin_theta = 0,
         enable = true, mode = 2,
         cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 200,
         kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,
@@ -414,7 +417,6 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 1024,
-        cos_theta = 32767, sin_theta = 0,
         enable = false, mode = 0,
         cmd_iq_ref = 0, cmd_speed_ref = 0, cmd_pos_ref = 0,
         kp_id = 256, ki_id = 32, kp_iq = 256, ki_iq = 32,

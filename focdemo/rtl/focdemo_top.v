@@ -1,7 +1,7 @@
 // =============================================================================
 // focdemo_top — Top-Level Integration for iCE40 FOC Demo
 //
-// Integrates: PLL, ADC (4ch), FOC controller (ReflexScript), sin/cos LUT,
+// Integrates: PLL, ADC (4ch), FOC controller (ReflexScript, with built-in trig LUTs),
 //             PWM (3ph), DRV8323RX SPI init, UART, serial command interface
 // =============================================================================
 `default_nettype none
@@ -95,28 +95,8 @@ module focdemo_top (
         .rx_valid  (uart_rx_valid)
     );
 
-    // === DEBUG: UART loopback — echo every received byte ===
-    // Remove once UART RX path is verified
-    reg [7:0] dbg_echo_data;
-    reg       dbg_echo_valid;
-    reg       dbg_rx_seen;       // sticky: latches on first RX byte
-    always @(posedge clk) begin
-        if (!rst_n_sync) begin
-            dbg_echo_data  <= 8'h00;
-            dbg_echo_valid <= 1'b0;
-            dbg_rx_seen    <= 1'b0;
-        end else begin
-            dbg_echo_valid <= 1'b0;
-            if (uart_rx_valid) begin
-                dbg_echo_data  <= uart_rx_data;
-                dbg_echo_valid <= uart_tx_ready;
-                dbg_rx_seen    <= 1'b1;
-            end
-        end
-    end
-    assign uart_tx_data  = dbg_echo_valid ? dbg_echo_data  : uart_tx_data_cmd;
-    assign uart_tx_valid = dbg_echo_valid ? 1'b1           : uart_tx_valid_cmd;
-    // === END DEBUG ===
+    assign uart_tx_data  = uart_tx_data_cmd;
+    assign uart_tx_valid = uart_tx_valid_cmd;
 
     // =========================================================================
     // Serial Command Interface
@@ -198,22 +178,10 @@ module focdemo_top (
     );
 
     // =========================================================================
-    // Sin/Cos Lookup Table
+    // FOC Closed-Loop Controller (ReflexScript-generated)
+    // Sin/cos computed internally via built-in trig LUTs
     // =========================================================================
     wire [15:0] theta_elec;
-    wire [15:0] sin_theta;
-    wire [15:0] cos_theta;
-
-    sincos_lut sincos_inst (
-        .clk      (clk),
-        .angle    (theta_elec),
-        .sin_out  (sin_theta),
-        .cos_out  (cos_theta)
-    );
-
-    // =========================================================================
-    // FOC Closed-Loop Controller (ReflexScript-generated)
-    // =========================================================================
     // Motor enable gated by DRV8323 init + serial command enable
     wire motor_enable = drv_init_done & cmd_enable & ~drv_init_fault;
 
@@ -231,9 +199,6 @@ module focdemo_top (
         .ib_raw         ({4'b0, adc_ch0_data}),  // ISENB
         .ic_raw         ({4'b0, adc_ch1_data}),  // ISENC
         .encoder_raw    ({4'b0, adc_ch3_data}),  // AS5600.OUT
-        // Sin/cos from LUT (1-clock pipeline)
-        .cos_theta      (cos_theta[15:0]),
-        .sin_theta      (sin_theta[15:0]),
         // Control from serial command
         .enable         (motor_enable),
         .mode           (cmd_mode),

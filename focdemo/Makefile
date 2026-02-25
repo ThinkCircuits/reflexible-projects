@@ -3,7 +3,7 @@
 #
 # Targets:
 #   all       — Full build (generate + synthesize + PnR + bitstream)
-#   generate  — Generate all derived sources (ReflexScript, templates, LUT)
+#   generate  — Generate all derived sources (ReflexScript, templates)
 #   program   — Program FPGA via iceprog
 #   lint      — Verilator lint check
 #   timing    — Show timing report from nextpnr
@@ -34,13 +34,13 @@ FREQ_MHZ     := 12
 # Source files
 RTL_SOURCES  := \
     rtl/pll_48mhz.v \
-    rtl/sincos_lut.v \
     rtl/drv8323_spi_init.v \
     rtl/serial_cmd.v \
     rtl/focdemo_top.v
 
 GEN_SOURCES  := \
     $(GEN_DIR)/foc_closedloop.sv \
+    $(GEN_DIR)/fp_trig_bram.sv \
     $(GEN_DIR)/adc_4ch.sv \
     $(GEN_DIR)/pwm_3ph.sv \
     $(GEN_DIR)/uart_focdemo.sv
@@ -68,13 +68,27 @@ all: $(BUILD_DIR)/$(PROJECT).bin
 # =============================================================================
 # Generate derived sources
 # =============================================================================
-generate: $(GEN_SOURCES) rtl/sincos_lut.v
+generate: $(GEN_SOURCES)
 
-# ReflexScript → SystemVerilog (reflexc outputs to a directory; extract .sv and strip timescale)
-$(GEN_DIR)/foc_closedloop.sv: rfx/foc_closedloop.rfx | $(GEN_DIR)
+# ReflexScript → SystemVerilog + BRAM LUT modules + hex data (reflexc outputs to a directory)
+$(GEN_DIR)/foc_closedloop.sv $(GEN_DIR)/fp_trig_bram.sv: rfx/foc_closedloop.rfx | $(GEN_DIR)
 	$(REFLEXC) --emit-verilog --verilog-fixed-point -o $(GEN_DIR)/_rfx_out $<
-	cp $(GEN_DIR)/_rfx_out/foc_closedloop.sv $@
-	sed -i 's/^`timescale/\/\/ `timescale/' $@
+	cp $(GEN_DIR)/_rfx_out/foc_closedloop.sv $(GEN_DIR)/foc_closedloop.sv
+	sed -i 's/^`timescale/\/\/ `timescale/' $(GEN_DIR)/foc_closedloop.sv
+	@if [ -f $(GEN_DIR)/_rfx_out/fp_trig_bram.sv ]; then \
+		cp $(GEN_DIR)/_rfx_out/fp_trig_bram.sv $(GEN_DIR)/fp_trig_bram.sv; \
+		sed -i 's/^`timescale/\/\/ `timescale/' $(GEN_DIR)/fp_trig_bram.sv; \
+	fi
+	@if [ -f $(GEN_DIR)/_rfx_out/sin_lut.hex ]; then \
+		cp $(GEN_DIR)/_rfx_out/sin_lut.hex $(GEN_DIR)/sin_lut.hex; \
+	fi
+	@if [ -f $(GEN_DIR)/_rfx_out/cos_lut.hex ]; then \
+		cp $(GEN_DIR)/_rfx_out/cos_lut.hex $(GEN_DIR)/cos_lut.hex; \
+	fi
+	@if [ -f $(GEN_DIR)/_rfx_out/fp_trig_lut.sv ]; then \
+		cp $(GEN_DIR)/_rfx_out/fp_trig_lut.sv $(GEN_DIR)/fp_trig_lut.sv; \
+		sed -i 's/^`timescale/\/\/ `timescale/' $(GEN_DIR)/fp_trig_lut.sv; \
+	fi
 
 # ADC template → SystemVerilog
 $(GEN_DIR)/adc_4ch.sv: $(PLATFORM_DIR)/adc_reader/adc_reader.sv.j2 render_template.py | $(GEN_DIR)
@@ -87,10 +101,6 @@ $(GEN_DIR)/pwm_3ph.sv: $(PLATFORM_DIR)/pwm_controller/pwm_controller.sv.j2 rende
 # UART template → SystemVerilog
 $(GEN_DIR)/uart_focdemo.sv: $(PLATFORM_DIR)/uart_transceiver/uart_transceiver.sv.j2 render_template.py | $(GEN_DIR)
 	$(PYTHON) render_template.py $< $@ $(UART_PARAMS)
-
-# Sin/cos LUT
-rtl/sincos_lut.v: rtl/gen_sincos_lut.py
-	cd rtl && $(PYTHON) gen_sincos_lut.py
 
 $(GEN_DIR):
 	mkdir -p $(GEN_DIR)

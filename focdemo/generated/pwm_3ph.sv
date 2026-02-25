@@ -129,13 +129,13 @@ module pwm_3ph (
                 if (ch0_dt_counter == 'd0) begin
                     ch0_dt_active <= 1'b0;
                     ch0_pos_reg   <= ch0_pwm_raw;
-                    ch0_neg_reg   <= ~ch0_pwm_raw;
+                    ch0_neg_reg   <= ~ch0_pwm_raw & ch0_en & global_en;
                 end else begin
                     ch0_dt_counter <= ch0_dt_counter - 1'b1;
                 end
             end else begin
                 ch0_pos_reg <= ch0_pwm_raw;
-                ch0_neg_reg <= ~ch0_pwm_raw;
+                ch0_neg_reg <= ~ch0_pwm_raw & ch0_en & global_en;
             end
         end
     end
@@ -187,13 +187,13 @@ module pwm_3ph (
                 if (ch1_dt_counter == 'd0) begin
                     ch1_dt_active <= 1'b0;
                     ch1_pos_reg   <= ch1_pwm_raw;
-                    ch1_neg_reg   <= ~ch1_pwm_raw;
+                    ch1_neg_reg   <= ~ch1_pwm_raw & ch1_en & global_en;
                 end else begin
                     ch1_dt_counter <= ch1_dt_counter - 1'b1;
                 end
             end else begin
                 ch1_pos_reg <= ch1_pwm_raw;
-                ch1_neg_reg <= ~ch1_pwm_raw;
+                ch1_neg_reg <= ~ch1_pwm_raw & ch1_en & global_en;
             end
         end
     end
@@ -245,13 +245,13 @@ module pwm_3ph (
                 if (ch2_dt_counter == 'd0) begin
                     ch2_dt_active <= 1'b0;
                     ch2_pos_reg   <= ch2_pwm_raw;
-                    ch2_neg_reg   <= ~ch2_pwm_raw;
+                    ch2_neg_reg   <= ~ch2_pwm_raw & ch2_en & global_en;
                 end else begin
                     ch2_dt_counter <= ch2_dt_counter - 1'b1;
                 end
             end else begin
                 ch2_pos_reg <= ch2_pwm_raw;
-                ch2_neg_reg <= ~ch2_pwm_raw;
+                ch2_neg_reg <= ~ch2_pwm_raw & ch2_en & global_en;
             end
         end
     end
