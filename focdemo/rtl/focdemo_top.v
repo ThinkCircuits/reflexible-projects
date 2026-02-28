@@ -60,16 +60,19 @@ module focdemo_top (
     // =========================================================================
     wire drv_init_done;
     wire drv_init_fault;
+    wire [10:0] drv_fault_reg;
 
     drv8323_spi_init drv_init_inst (
-        .clk        (clk),
-        .rst_n      (rst_n_sync),
-        .spi_sclk   (drv_sclk),
-        .spi_sdi    (drv_sdi),
-        .spi_sdo    (drv_sdo),
-        .spi_ncs    (drv_ncs),
-        .init_done  (drv_init_done),
-        .init_fault (drv_init_fault)
+        .clk             (clk),
+        .rst_n           (rst_n_sync),
+        .clear_fault_req (clear_fault_req),
+        .spi_sclk        (drv_sclk),
+        .spi_sdi         (drv_sdi),
+        .spi_sdo         (drv_sdo),
+        .spi_ncs         (drv_ncs),
+        .init_done       (drv_init_done),
+        .init_fault      (drv_init_fault),
+        .fault_reg       (drv_fault_reg)
     );
 
     // =========================================================================
@@ -116,6 +119,7 @@ module focdemo_top (
     wire signed [15:0] dbg_id;
     wire signed [15:0] dbg_iq;
     wire [15:0] foc_pwm_a, foc_pwm_b, foc_pwm_c;
+    wire [15:0] dbg_ia, dbg_ib, dbg_ic, dbg_enc;
 
     serial_cmd serial_cmd_inst (
         .clk            (clk),
@@ -142,14 +146,20 @@ module focdemo_top (
         .kp_pos         (kp_pos),
         // Telemetry
         .foc_fault      (foc_fault),
+        .drv_fault_reg  (drv_fault_reg),
         .dbg_pos        (dbg_pos),
         .dbg_speed      (dbg_speed),
         .dbg_id         (dbg_id),
         .dbg_iq         (dbg_iq),
-        .dbg_pwm_a      (foc_pwm_a),
-        .dbg_pwm_b      (foc_pwm_b),
-        .dbg_pwm_c      (foc_pwm_c)
+        .dbg_ia         (dbg_ia),
+        .dbg_ib         (dbg_ib),
+        .dbg_ic         (dbg_ic),
+        .dbg_enc        (dbg_enc)
     );
+
+    reg cmd_enable_d1;
+    always @(posedge clk) if (rst_n_sync) cmd_enable_d1 <= cmd_enable;
+    wire clear_fault_req = cmd_enable && !cmd_enable_d1;
 
     // =========================================================================
     // ADC 4-Channel Reader (AD7476A x4)
@@ -185,13 +195,37 @@ module focdemo_top (
     // Motor enable gated by DRV8323 init + serial command enable
     wire motor_enable = drv_init_done & cmd_enable & ~drv_init_fault;
 
+    // Clock enable for FOC: divide-by-3 (48 MHz / 3 = 16 MHz effective)
+    // Gives combinational paths 62.5 ns to settle vs 20.8 ns at full rate
+    reg [1:0] foc_ce_cnt;
+    wire foc_ce = (foc_ce_cnt == 2'd0);
+    always @(posedge clk) begin
+        if (!rst_n_sync)
+            foc_ce_cnt <= 2'd0;
+        else
+            foc_ce_cnt <= (foc_ce_cnt == 2'd2) ? 2'd0 : foc_ce_cnt + 2'd1;
+    end
+
+    // Latch ADC new_data until FOC can accept it on a ce-enabled cycle
+    wire foc_ready;
+    reg adc_data_pending;
+    always @(posedge clk) begin
+        if (!rst_n_sync)
+            adc_data_pending <= 1'b0;
+        else if (adc_new_data)
+            adc_data_pending <= 1'b1;
+        else if (foc_ce && foc_ready)
+            adc_data_pending <= 1'b0;
+    end
+
     wire foc_valid_out;
 
     foc_closedloop foc_inst (
         .clk            (clk),
         .rst_n          (rst_n_sync),
-        .valid_in       (adc_new_data),
-        .ready_out      (),             // Unused — FOC always ready next cycle
+        .ce             (foc_ce),
+        .valid_in       (adc_data_pending),
+        .ready_out      (foc_ready),
         .valid_out      (foc_valid_out),
         .ready_in       (1'b1),         // Always accept FOC output
         // ADC current inputs (channel mapping from hwsetup.md)
@@ -222,7 +256,11 @@ module focdemo_top (
         .dbg_id         (dbg_id),
         .dbg_iq         (dbg_iq),
         .dbg_speed      (dbg_speed),
-        .dbg_pos        (dbg_pos)
+        .dbg_pos        (dbg_pos),
+        .dbg_ia         (dbg_ia),
+        .dbg_ib         (dbg_ib),
+        .dbg_ic         (dbg_ic),
+        .dbg_enc        (dbg_enc)
     );
 
     // =========================================================================

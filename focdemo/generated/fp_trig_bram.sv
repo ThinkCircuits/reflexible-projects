@@ -8,7 +8,7 @@
  * Read latency: 1 clock cycle
  */
 
-`timescale 1ns/1ps
+// `timescale 1ns/1ps
 
 // BRAM-based sin lookup table (inferred as block RAM by synthesis)
 module sin_bram_lut #(

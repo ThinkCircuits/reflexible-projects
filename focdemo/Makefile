@@ -3,6 +3,8 @@
 #
 # Targets:
 #   all       — Full build (generate + synthesize + PnR + bitstream)
+#   simple    — Simplified BLDC 6-step open-loop driver (no FOC)
+#   openloop  — Open-loop sinusoidal (FOC-style) driver, smooth rotation
 #   generate  — Generate all derived sources (ReflexScript, templates)
 #   program   — Program FPGA via iceprog
 #   lint      — Verilator lint check
@@ -61,7 +63,7 @@ UART_PARAMS  := instance_name=uart_focdemo baud_rate=115200 \
 # =============================================================================
 # Default target
 # =============================================================================
-.PHONY: all generate program lint timing clean
+.PHONY: all generate program lint timing clean simple simple-program openloop openloop-program debug debug-program debug-lint
 
 all: $(BUILD_DIR)/$(PROJECT).bin
 
@@ -123,7 +125,8 @@ $(BUILD_DIR)/$(PROJECT).asc: $(BUILD_DIR)/$(PROJECT).json $(PCF)
 	    --json $< \
 	    --asc $@ \
 	    --freq $(FREQ_MHZ) \
-	    --timing-allow-fail
+	    --timing-allow-fail \
+	    --seed 2
 
 # =============================================================================
 # Bitstream (icepack)
@@ -175,7 +178,144 @@ test: rfx/foc_closedloop.rfx | $(BUILD_DIR)
 	$(BUILD_DIR)/rfx_test/foc_closedloop-tests
 
 # =============================================================================
+# Simple BLDC — 6-step open-loop driver (no FOC, no ADC)
+# =============================================================================
+SIMPLE_BUILD_DIR := build_simple
+SIMPLE_PROJECT   := simple_bldc
+
+SIMPLE_RTL_SOURCES := \
+    rtl/pll_48mhz.v \
+    rtl/drv8323_spi_init.v \
+    rtl/serial_cmd.v \
+    rtl/bldc_6step.v \
+    rtl/simple_bldc_top.v
+
+SIMPLE_GEN_SOURCES := \
+    $(GEN_DIR)/pwm_3ph.sv \
+    $(GEN_DIR)/uart_focdemo.sv
+
+SIMPLE_ALL_SOURCES := $(SIMPLE_RTL_SOURCES) $(SIMPLE_GEN_SOURCES)
+
+simple: $(SIMPLE_BUILD_DIR)/$(SIMPLE_PROJECT).bin
+
+$(SIMPLE_BUILD_DIR):
+	mkdir -p $(SIMPLE_BUILD_DIR)
+
+$(SIMPLE_BUILD_DIR)/$(SIMPLE_PROJECT).json: $(SIMPLE_ALL_SOURCES) | $(SIMPLE_BUILD_DIR)
+	$(YOSYS) -p "read_verilog -sv $(SIMPLE_ALL_SOURCES); synth_ice40 -top simple_bldc_top -dsp -json $@"
+
+$(SIMPLE_BUILD_DIR)/$(SIMPLE_PROJECT).asc: $(SIMPLE_BUILD_DIR)/$(SIMPLE_PROJECT).json $(PCF)
+	$(NEXTPNR) --$(DEVICE) --package $(PACKAGE) \
+	    --pcf $(PCF) \
+	    --json $< \
+	    --asc $@ \
+	    --freq $(FREQ_MHZ) \
+	    --timing-allow-fail \
+	    --seed 2
+
+$(SIMPLE_BUILD_DIR)/$(SIMPLE_PROJECT).bin: $(SIMPLE_BUILD_DIR)/$(SIMPLE_PROJECT).asc
+	$(ICEPACK) $< $@
+
+simple-program: $(SIMPLE_BUILD_DIR)/$(SIMPLE_PROJECT).bin
+	$(ICEPROG) $<
+
+simple-lint: $(SIMPLE_GEN_SOURCES)
+	$(VERILATOR) --lint-only -Wall \
+	    -Wno-WIDTH -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-SYNCASYNCNET \
+	    --top-module simple_bldc_top \
+	    rtl/ice40_cells_stub.v $(SIMPLE_ALL_SOURCES)
+
+# =============================================================================
+# Open-loop FOC — Sinusoidal drive, no encoder/current feedback
+# =============================================================================
+OPENLOOP_BUILD_DIR := build_openloop
+OPENLOOP_PROJECT   := openloop_bldc
+
+OPENLOOP_RTL_SOURCES := \
+    rtl/pll_48mhz.v \
+    rtl/drv8323_spi_init.v \
+    rtl/serial_cmd.v \
+    rtl/open_loop_foc.v \
+    rtl/openloop_bldc_top.v
+
+OPENLOOP_GEN_SOURCES := \
+    $(GEN_DIR)/pwm_3ph.sv \
+    $(GEN_DIR)/uart_focdemo.sv
+
+OPENLOOP_ALL_SOURCES := $(OPENLOOP_RTL_SOURCES) $(OPENLOOP_GEN_SOURCES)
+
+openloop: $(OPENLOOP_BUILD_DIR)/$(OPENLOOP_PROJECT).bin
+
+$(OPENLOOP_BUILD_DIR):
+	mkdir -p $(OPENLOOP_BUILD_DIR)
+
+$(OPENLOOP_BUILD_DIR)/$(OPENLOOP_PROJECT).json: $(OPENLOOP_ALL_SOURCES) | $(OPENLOOP_BUILD_DIR)
+	$(YOSYS) -p "read_verilog -sv $(OPENLOOP_ALL_SOURCES); synth_ice40 -top openloop_bldc_top -dsp -json $@"
+
+$(OPENLOOP_BUILD_DIR)/$(OPENLOOP_PROJECT).asc: $(OPENLOOP_BUILD_DIR)/$(OPENLOOP_PROJECT).json $(PCF)
+	$(NEXTPNR) --$(DEVICE) --package $(PACKAGE) \
+	    --pcf $(PCF) \
+	    --json $< \
+	    --asc $@ \
+	    --freq $(FREQ_MHZ) \
+	    --timing-allow-fail \
+	    --seed 2
+
+$(OPENLOOP_BUILD_DIR)/$(OPENLOOP_PROJECT).bin: $(OPENLOOP_BUILD_DIR)/$(OPENLOOP_PROJECT).asc
+	$(ICEPACK) $< $@
+
+openloop-program: $(OPENLOOP_BUILD_DIR)/$(OPENLOOP_PROJECT).bin
+	$(ICEPROG) $<
+
+# =============================================================================
+# Debug Build — Direct peripheral control (no FOC controller)
+# =============================================================================
+DEBUG_BUILD_DIR := build_debug
+DEBUG_PROJECT   := focdemo_debug
+
+DEBUG_RTL_SOURCES := \
+    rtl/pll_48mhz.v \
+    rtl/drv_spi_master.v \
+    rtl/serial_cmd_debug.v \
+    rtl/debug_top.v
+
+DEBUG_GEN_SOURCES := \
+    $(GEN_DIR)/adc_4ch.sv \
+    $(GEN_DIR)/pwm_3ph.sv \
+    $(GEN_DIR)/uart_focdemo.sv
+
+DEBUG_ALL_SOURCES := $(DEBUG_RTL_SOURCES) $(DEBUG_GEN_SOURCES)
+
+debug: $(DEBUG_BUILD_DIR)/$(DEBUG_PROJECT).bin
+
+$(DEBUG_BUILD_DIR):
+	mkdir -p $(DEBUG_BUILD_DIR)
+
+$(DEBUG_BUILD_DIR)/$(DEBUG_PROJECT).json: $(DEBUG_ALL_SOURCES) | $(DEBUG_BUILD_DIR)
+	$(YOSYS) -p "read_verilog -sv $(DEBUG_ALL_SOURCES); synth_ice40 -top debug_top -dsp -json $@"
+
+$(DEBUG_BUILD_DIR)/$(DEBUG_PROJECT).asc: $(DEBUG_BUILD_DIR)/$(DEBUG_PROJECT).json $(PCF)
+	$(NEXTPNR) --$(DEVICE) --package $(PACKAGE) \
+	    --pcf $(PCF) \
+	    --json $< \
+	    --asc $@ \
+	    --freq $(FREQ_MHZ) \
+	    --seed 2
+
+$(DEBUG_BUILD_DIR)/$(DEBUG_PROJECT).bin: $(DEBUG_BUILD_DIR)/$(DEBUG_PROJECT).asc
+	$(ICEPACK) $< $@
+
+debug-program: $(DEBUG_BUILD_DIR)/$(DEBUG_PROJECT).bin
+	$(ICEPROG) $<
+
+debug-lint: $(DEBUG_GEN_SOURCES)
+	$(VERILATOR) --lint-only -Wall \
+	    -Wno-WIDTH -Wno-UNUSED -Wno-PINCONNECTEMPTY -Wno-SYNCASYNCNET \
+	    --top-module debug_top \
+	    rtl/ice40_cells_stub.v $(DEBUG_ALL_SOURCES)
+
+# =============================================================================
 # Clean
 # =============================================================================
 clean:
-	rm -rf $(BUILD_DIR) $(GEN_DIR)
+	rm -rf $(BUILD_DIR) $(DEBUG_BUILD_DIR) $(SIMPLE_BUILD_DIR) $(OPENLOOP_BUILD_DIR) $(GEN_DIR)

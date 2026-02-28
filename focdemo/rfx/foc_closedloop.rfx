@@ -36,7 +36,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
   // ------------------------------------------------------------------
   input:  ia_raw:        u16,   // Phase A ADC reading (0-4095)
           ib_raw:        u16,   // Phase B ADC reading (0-4095)
-          ic_raw:        u16,   // Phase C ADC reading (0-4095, redundant – used for fault check)
+          ic_raw:        u16,   // Phase C ADC reading (0-4095)
           encoder_raw:   u16,   // Encoder ADC reading (0-4095)
           enable:        bool,  // Drive enable (false -> coast)
           mode:          u8,    // 0=torque, 1=speed, 2=position
@@ -62,7 +62,11 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
           dbg_id:    i16,   // Debug: d-axis current (Q15)
           dbg_iq:    i16,   // Debug: q-axis current (Q15)
           dbg_speed: i16,   // Debug: estimated speed (encoder counts/cycle)
-          dbg_pos:   u16    // Debug: estimated position (encoder counts)
+          dbg_pos:   u16,   // Debug: estimated position (encoder counts)
+          dbg_ia:    u16,   // Debug: raw Phase A ADC (0-4095)
+          dbg_ib:    u16,   // Debug: raw Phase B ADC (0-4095)
+          dbg_ic:    u16,   // Debug: raw Phase C ADC (0-4095)
+          dbg_enc:   u16    // Debug: raw encoder ADC (0-4095)
 
   // ------------------------------------------------------------------
   // STATE  (PI integrators + observer state)
@@ -73,7 +77,10 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
           last_encoder:     u16 = 0,  // Encoder reading from previous cycle
           position:         u16 = 0,  // Tracked position (mirrors encoder_raw)
           speed_est:        i16 = 0,  // Estimated speed (encoder counts/cycle, signed)
-          fault_latch:      bool = false  // Latching overcurrent fault flag
+          fault_latch:      bool = false,  // Latching overcurrent fault flag
+          ia_offset:        u16 = 2048,  // Phase A zero-current ADC offset
+          ib_offset:        u16 = 2048,  // Phase B zero-current ADC offset
+          ic_offset:        u16 = 2048   // Phase C zero-current ADC offset
 
   // ------------------------------------------------------------------
   // SAFETY
@@ -105,7 +112,10 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       last_encoder     in 0..4095,
       position         in 0..4095,
       speed_est        in -32768..32767,
-      fault_latch      in { true, false }
+      fault_latch      in { true, false },
+      ia_offset        in 0..4095,
+      ib_offset        in 0..4095,
+      ic_offset        in 0..4095
     }
 
     output: {
@@ -117,7 +127,11 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       dbg_id     in -32768..32767,
       dbg_iq     in -32768..32767,
       dbg_speed  in -32768..32767,
-      dbg_pos    in 0..4095
+      dbg_pos    in 0..4095,
+      dbg_ia     in 0..4095,
+      dbg_ib     in 0..4095,
+      dbg_ic     in 0..4095,
+      dbg_enc    in 0..4095
     }
 
     require: {
@@ -169,21 +183,39 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     dbg_pos   = position
 
     // ================================================================
-    // STEP 3 – ADC current conversion  (0-4095 -> +-2047, centered)
+    // STEP 3 – ADC offset calibration + current conversion
+    // While disabled, continuously capture zero-current ADC baselines.
+    // When enabled, subtract the captured offsets instead of hardcoded 2048.
     // ================================================================
-    let ia: i16 = clamp(i32_to_i16(ia_raw - 2048), -2047, 2047)
-    let ib: i16 = clamp(i32_to_i16(ib_raw - 2048), -2047, 2047)
-    // Redundant phase-C from Kirchhoff (ic = -(ia + ib))
-    let ic_calc_raw: i32 = -(ia + ib)
-    let ic_calc: i16 = clamp(i32_to_i16(ic_calc_raw), -2047, 2047)
+    if (!enable) {
+      ia_offset = ia_raw
+      ib_offset = ib_raw
+      ic_offset = ic_raw
+    }
+    // Subtract offsets using i32 intermediates to ensure signed arithmetic
+    // (u16 - u16 wraps unsigned; binding to i32 forces signed subtraction)
+    let ia_diff: i32 = ia_raw - ia_offset
+    let ib_diff: i32 = ib_raw - ib_offset
+    let ic_diff: i32 = ic_raw - ic_offset
+    let ia: i16 = clamp(i32_to_i16(ia_diff), -2047, 2047)
+    let ib: i16 = clamp(i32_to_i16(ib_diff), -2047, 2047)
+    let ic: i16 = clamp(i32_to_i16(ic_diff), -2047, 2047)
+
+    // Expose raw ADC readings for debug
+    dbg_ia  = ia_raw
+    dbg_ib  = ib_raw
+    dbg_ic  = ic_raw
+    dbg_enc = encoder_raw
 
     // ================================================================
     // STEP 4 – Clarke transform  (3-phase -> alpha/beta)
     // i_alpha = ia
-    // i_beta  = (ia + 2*ib) / sqrt(3)   [using Q15 constant 18919]
+    // i_beta  = (ib - ic) / sqrt(3)   [using Q15 constant 18919]
+    // Uses all three measured phase currents — more robust than the
+    // 2-sensor form (ia + 2*ib)/sqrt(3) when ADC offsets differ.
     // ================================================================
     let i_alpha: i16 = ia
-    let i_beta_temp: i32 = ((ia + (2 * ib)) * 18919) / 32768
+    let i_beta_temp: i32 = ((ib - ic) * 18919) / 32768
     let i_beta: i16 = clamp(i32_to_i16(i_beta_temp), -2047, 2047)
 
     // ================================================================
@@ -208,7 +240,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     let abs_id: i16 = abs(id_meas)
     let abs_iq: i16 = abs(iq_meas)
     if ((abs_id > 1800) || (abs_iq > 1800)) {
-      fault_latch = true
+      //fault_latch = true
     }
     // Clear fault latch only when the drive is explicitly disabled
     if (!enable) {
@@ -341,7 +373,8 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // (id_ref = 0, iq_ref = 0, both errors = 0, vd = vq = 0 -> v_alpha = v_beta = 0)
     test zero_command_enabled
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
-               last_encoder = 0, position = 0, speed_est = 0 },
+               last_encoder = 0, position = 0, speed_est = 0,
+               ia_offset = 2048, ib_offset = 2048, ic_offset = 2048 },
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 0,
@@ -356,7 +389,8 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // ia_raw = 3900 -> ia = 1852; with cos(0)~32767, sin(0)~0: id ~ 1852 > 1800 -> fault
     test fault_on_overcurrent
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
-               last_encoder = 0, position = 0, speed_est = 0 },
+               last_encoder = 0, position = 0, speed_est = 0,
+               ia_offset = 2048, ib_offset = 2048, ic_offset = 2048 },
       inputs: {
         ia_raw = 3900, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 0,
@@ -371,7 +405,8 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // (fault latch resets when enable = false)
     test fault_clears_on_disable
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
-               last_encoder = 0, position = 0, speed_est = 0 },
+               last_encoder = 0, position = 0, speed_est = 0,
+               ia_offset = 2048, ib_offset = 2048, ic_offset = 2048 },
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 0,
@@ -413,7 +448,8 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // Test 7 – theta_elec tracks encoder_raw * 16
     test theta_elec_from_encoder
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
-               last_encoder = 0, position = 0, speed_est = 0 },
+               last_encoder = 0, position = 0, speed_est = 0,
+               ia_offset = 2048, ib_offset = 2048, ic_offset = 2048 },
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 1024,

@@ -52,10 +52,10 @@ def crc8_maxim(data: bytes) -> int:
     for byte in data:
         crc ^= byte
         for _ in range(8):
-            if crc & 0x80:
-                crc = ((crc << 1) ^ 0x31) & 0xFF
+            if crc & 0x01:
+                crc = (crc >> 1) ^ 0x8C
             else:
-                crc = (crc << 1) & 0xFF
+                crc >>= 1
     return crc
 
 
@@ -71,28 +71,53 @@ def build_frame(cmd: int, payload: bytes = b"") -> bytes:
 
 
 def parse_status_payload(payload: bytes) -> dict:
-    """Parse a 17-byte STATUS response payload."""
-    if len(payload) < 17:
+    """Parse a STATUS response payload (21 bytes)."""
+    if len(payload) < 13:
         return {}
     mode = payload[0]
     enable = payload[1]
     fault = payload[2]
-    pos, speed, id_val, iq_val = struct.unpack_from("<HhhH", payload, 3)
-    # Fix: iq should be signed
-    iq_val = struct.unpack_from("<h", payload, 9)[0]
-    pwm_a, pwm_b, pwm_c = struct.unpack_from("<HHH", payload, 11)
-    return {
+    drv_fault_reg, = struct.unpack_from("<H", payload, 3)  # 11 bits in u16
+    pos,   = struct.unpack_from("<H", payload, 5)
+    speed, = struct.unpack_from("<h", payload, 7)
+    id_val,= struct.unpack_from("<h", payload, 9)
+    iq_val,= struct.unpack_from("<h", payload, 11)
+    result = {
         "mode": mode,
         "enable": enable,
         "fault": fault,
+        "drv_fault_reg": drv_fault_reg,
         "pos": pos,
         "speed": speed,
         "id": id_val,
         "iq": iq_val,
-        "pwm_a": pwm_a,
-        "pwm_b": pwm_b,
-        "pwm_c": pwm_c,
     }
+    if len(payload) >= 21:
+        ia, ib, ic, enc = struct.unpack_from("<HHHH", payload, 13)
+        result.update({"ia": ia, "ib": ib, "ic": ic, "enc": enc})
+    return result
+
+
+# DRV8323 Fault Status 1 register (0x00) bit definitions
+DRV_FAULT_BITS = [
+    (10, "FAULT"),
+    (9,  "VDS_OCP"),
+    (8,  "GDF"),
+    (7,  "UVLO"),
+    (6,  "OTSD"),
+    (5,  "VDS_HA"),
+    (4,  "VDS_LA"),
+    (3,  "VDS_HB"),
+    (2,  "VDS_LB"),
+    (1,  "VDS_HC"),
+    (0,  "VDS_LC"),
+]
+
+
+def decode_drv_fault(reg_val: int) -> str:
+    """Decode DRV8323 Fault Status 1 register into flag names."""
+    flags = [name for bit, name in DRV_FAULT_BITS if reg_val & (1 << bit)]
+    return " | ".join(flags) if flags else "OK"
 
 
 # =============================================================================
@@ -246,6 +271,7 @@ def tui_main(stdscr, foc: FocSerial, args):
     local_mode = 0
     local_target = 0
     editing_target = False
+    editing_cmd = None  # 't', 's', or 'p' — which key initiated editing
     target_buf = ""
     stream_period = 50
 
@@ -301,14 +327,22 @@ def tui_main(stdscr, foc: FocSerial, args):
 
         en_str = " ON " if local_enable else " OFF"
         mode_str = MODE_NAMES.get(local_mode, "???")
+        drv_reg = st.get("drv_fault_reg", 0)
+        drv_str = decode_drv_fault(drv_reg)
         motor_line = f" Enable: [{en_str}]   Mode: [{mode_str:8s}]   Fault: {fault_str}"
         stdscr.addstr(row, 0, "|" + motor_line.ljust(w - 2) + "|")
         if st.get("fault", 0) and curses.has_colors():
             stdscr.chgat(row, motor_line.index("Fault:") + 1, len(fault_str) + 7, curses.color_pair(1) | curses.A_BOLD)
         row += 1
+        drv_line = f" DRV8323: 0x{drv_reg:03X} = {drv_str}"
+        stdscr.addstr(row, 0, "|" + drv_line.ljust(w - 2) + "|")
+        if drv_reg and curses.has_colors():
+            stdscr.chgat(row, 1, len(drv_line), curses.color_pair(1) | curses.A_BOLD)
+        row += 1
 
         if editing_target:
-            target_line = f" Target: {target_buf}_"
+            edit_label = {'t': 'Torque', 's': 'Speed', 'p': 'Position'}.get(editing_cmd, 'Target')
+            target_line = f" {edit_label}: {target_buf}_"
         else:
             unit = {0: "", 1: " cnt/s", 2: " counts"}.get(local_mode, "")
             target_line = f" Target: {local_target}{unit}"
@@ -331,10 +365,11 @@ def tui_main(stdscr, foc: FocSerial, args):
         stdscr.addstr(row, 0, "|" + tel2.ljust(w - 2) + "|")
         row += 1
 
-        pa = st.get("pwm_a", 0)
-        pb = st.get("pwm_b", 0)
-        pc = st.get("pwm_c", 0)
-        tel3 = f" PWM:  A={pa:4d}  B={pb:4d}  C={pc:4d}"
+        ia  = st.get("ia",  0)
+        ib  = st.get("ib",  0)
+        ic  = st.get("ic",  0)
+        enc = st.get("enc", 0)
+        tel3 = f" ADC raw:  Ia={ia:4d}  Ib={ib:4d}  Ic={ic:4d}  Enc={enc:4d}"
         stdscr.addstr(row, 0, "|" + tel3.ljust(w - 2) + "|")
         row += 1
 
@@ -365,7 +400,7 @@ def tui_main(stdscr, foc: FocSerial, args):
         # Keys section
         stdscr.addstr(row, 0, "+" + "- Keys " + "-" * (w - 9) + "+")
         row += 1
-        keys = " e:enable  m:mode  t/s/p:set target  g:gains  r:reset  q:quit"
+        keys = " e:enable  m:mode  t:torque  s:speed  p:pos  g:gains  r:reset  q:quit"
         stdscr.addstr(row, 0, "|" + keys.ljust(w - 2) + "|")
         row += 1
         stdscr.addstr(row, 0, "+" + "-" * (w - 2) + "+")
@@ -385,12 +420,12 @@ def tui_main(stdscr, foc: FocSerial, args):
                     pass
                 editing_target = False
                 target_buf = ""
-                # Send appropriate command
-                if local_mode == 0:
+                # Send appropriate command based on which key initiated editing
+                if editing_cmd == 't':
                     foc.set_torque(local_target)
-                elif local_mode == 1:
+                elif editing_cmd == 's':
                     foc.set_speed(local_target)
-                elif local_mode == 2:
+                elif editing_cmd == 'p':
                     foc.set_position(local_target & 0xFFFF)
             elif key == 27:  # Escape
                 editing_target = False
@@ -410,19 +445,21 @@ def tui_main(stdscr, foc: FocSerial, args):
             local_mode = (local_mode + 1) % 3
             foc.set_mode(local_mode)
         elif key == ord("t"):
-            local_mode = 0
-            foc.set_mode(0)
+            # Set torque value: direct iq_ref in torque mode, torque limit in speed/position mode
             editing_target = True
+            editing_cmd = 't'
             target_buf = ""
         elif key == ord("s"):
             local_mode = 1
             foc.set_mode(1)
             editing_target = True
+            editing_cmd = 's'
             target_buf = ""
         elif key == ord("p"):
             local_mode = 2
             foc.set_mode(2)
             editing_target = True
+            editing_cmd = 'p'
             target_buf = ""
         elif key == ord("r"):
             foc.reset()

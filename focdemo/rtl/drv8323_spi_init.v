@@ -16,16 +16,17 @@
 //
 // Configuration sequence:
 //   1. Wait ~10 ms power-up delay (480 000 system clocks)
-//   2. Write 0x02 (Driver Control)  frame 16'h0400
-//   3. Write 0x05 (OCP Control)     frame 16'h0A96
-//   4. Write 0x06 (CSA Control)     frame 16'h0C80
-//   5. Read  0x01 (Fault Status)    frame 16'h8800  → capture 11 data bits
+//   2. Write 0x02 (Driver Control)  frame 16'h1000
+//   3. Write 0x05 (OCP Control)     frame 16'h2896
+//   4. Write 0x06 (CSA Control)     frame 16'h3080
+//   5. Read  0x00 (Fault Status)    frame 16'h8000  → capture 11 data bits
 //   6. Assert init_done; assert init_fault if fault bits ≠ 0
 // ----------------------------------------------------------------------------
 
 module drv8323_spi_init (
     input  wire clk,        // 48 MHz system clock
     input  wire rst_n,      // active-low synchronous reset
+    input  wire clear_fault_req,  // pulse when re-enabling: run CLR_FLT + re-read fault
 
     output reg  spi_sclk,   // SPI clock to DRV8323
     output reg  spi_sdi,    // MOSI: FPGA → DRV8323
@@ -33,7 +34,8 @@ module drv8323_spi_init (
     output reg  spi_ncs,    // chip-select, active low
 
     output reg  init_done,  // pulses / latches high when sequence complete
-    output reg  init_fault  // latches high if fault register non-zero
+    output reg  init_fault, // latches high if fault register non-zero
+    output reg [10:0] fault_reg  // raw fault status bits from register 0x00
 );
 
 // ---------------------------------------------------------------------------
@@ -47,19 +49,21 @@ localparam CS_HOLD        = 4;           // last SCLK edge → CS deassert (clks
 localparam INTER_GAP      = 96;          // inter-frame gap (clks, ≥ 2 SCLK periods)
 
 // Number of SPI frames
-localparam NUM_FRAMES     = 4;
+localparam NUM_FRAMES     = 5;
 localparam FRAME_BITS     = 16;
 
 // ---------------------------------------------------------------------------
 // SPI frame ROM
 // ---------------------------------------------------------------------------
-// Index 0-2: writes; index 3: fault-status read
+// Index 0-2: config writes; index 3: clear latched faults; index 4: fault read
 reg [15:0] frame_rom [0:NUM_FRAMES-1];
 initial begin
-    frame_rom[0] = 16'h0400; // W=0, ADDR=0x02, DATA=0x000 – Driver Control
-    frame_rom[1] = 16'h0A96; // W=0, ADDR=0x05, DATA=0x096 – OCP Control
-    frame_rom[2] = 16'h0C80; // W=0, ADDR=0x06, DATA=0x080 – CSA Control (gain=40)
-    frame_rom[3] = 16'h8800; // R=1, ADDR=0x01, DATA=x     – Fault Status read
+    // Frame format: {R/W(1), ADDR(4) @ bits14:11, DATA(11) @ bits10:0}
+    frame_rom[0] = 16'h1000; // W=0, ADDR=0x02, DATA=0x000 – Driver Control
+    frame_rom[1] = 16'h2896; // W=0, ADDR=0x05, DATA=0x096 – OCP Control
+    frame_rom[2] = 16'h3080; // W=0, ADDR=0x06, DATA=0x080 – CSA Control (gain=40)
+    frame_rom[3] = 16'h1001; // W=0, ADDR=0x02, DATA=0x001 – CLR_FLT (clear latched faults)
+    frame_rom[4] = 16'h8000; // R=1, ADDR=0x00, DATA=x     – Fault Status 1 read
 end
 
 // ---------------------------------------------------------------------------
@@ -72,12 +76,14 @@ localparam [3:0]
     S_SHIFT     = 4'd3,  // clock out/in 16 bits
     S_CS_HOLD   = 4'd4,  // deassert CS, wait hold time
     S_GAP       = 4'd5,  // inter-frame idle
-    S_DONE      = 4'd6;  // all frames complete
+    S_DONE      = 4'd6,  // all frames complete
+    S_CLR_START = 4'd7;  // re-run frames 3+4 (CLR_FLT then read fault) on re-enable
 
 // ---------------------------------------------------------------------------
 // Registers
 // ---------------------------------------------------------------------------
 reg [3:0]  state;
+reg        clr_in_progress;  // avoid re-entry while clear sequence runs
 
 // Delay / bit counters
 reg [19:0] delay_cnt;    // up to 480 000 – needs 19 bits (2^19 = 524288 > 480000)
@@ -163,6 +169,8 @@ always @(posedge clk) begin
         rx_data    <= 11'd0;
         init_done  <= 1'b0;
         init_fault <= 1'b0;
+        fault_reg  <= 11'd0;
+        clr_in_progress <= 1'b0;
     end else begin
         case (state)
 
@@ -230,14 +238,12 @@ always @(posedge clk) begin
                 end
 
                 // --- Rising edge: drive next MOSI bit ---
-                if (sclk_rise_en) begin
-                    // Shift register: drive bit (14 - bit_cnt) next
-                    // After the falling edge incremented bit_cnt, the next bit
-                    // to drive is shift_reg[14 - bit_cnt] ... but we update
-                    // sdi here for the *upcoming* falling edge.
-                    // shift_reg bit to send = index 14 down to 0 after bit 15.
+                // Skip the first rising edge (bit_cnt==0): bit[15] is already
+                // on SDI from CS setup and must remain until the DRV samples
+                // it on the first falling edge.
+                if (sclk_rise_en && bit_cnt != 5'd0) begin
                     shift_reg <= {shift_reg[14:0], 1'b0};
-                    spi_sdi   <= shift_reg[14]; // next MSB after left-shift
+                    spi_sdi   <= shift_reg[14];
                 end
             end
 
@@ -276,17 +282,30 @@ always @(posedge clk) begin
             end
 
             // ------------------------------------------------------------------
-            // S_DONE – latch results and assert init_done
+            // S_DONE – latch results, assert init_done; on clear_fault_req run CLR_FLT + read
             // ------------------------------------------------------------------
             S_DONE: begin
-                init_done <= 1'b1;
-                // rx_data holds the 11 data bits of the fault-status frame.
-                // The DRV8323 fault status register 0x00/0x01 returns fault
-                // information in bits [10:0].  Any non-zero value = fault.
+                init_done  <= 1'b1;
+                fault_reg  <= rx_data;
                 if (rx_data != 11'd0) begin
                     init_fault <= 1'b1;
+                end else begin
+                    init_fault <= 1'b0;
                 end
-                // Stay in DONE forever (one-shot)
+                clr_in_progress <= 1'b0;
+                if (clear_fault_req && !clr_in_progress) begin
+                    state          <= S_CLR_START;
+                    clr_in_progress<= 1'b1;
+                end
+            end
+
+            // ------------------------------------------------------------------
+            // S_CLR_START – re-run frame 3 (CLR_FLT) and frame 4 (read fault)
+            // ------------------------------------------------------------------
+            S_CLR_START: begin
+                frame_idx <= 3'd3;
+                state     <= S_CS_SETUP;
+                delay_cnt <= 20'd0;
             end
 
             default: state <= S_IDLE;

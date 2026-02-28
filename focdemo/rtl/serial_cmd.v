@@ -49,13 +49,15 @@ module serial_cmd (
     // FOC telemetry inputs
     // -------------------------------------------------------------------------
     input  wire        foc_fault,
+    input  wire [10:0] drv_fault_reg,
     input  wire [15:0] dbg_pos,
     input  wire signed [15:0] dbg_speed,
     input  wire signed [15:0] dbg_id,
     input  wire signed [15:0] dbg_iq,
-    input  wire [15:0] dbg_pwm_a,
-    input  wire [15:0] dbg_pwm_b,
-    input  wire [15:0] dbg_pwm_c
+    input  wire [15:0] dbg_ia,
+    input  wire [15:0] dbg_ib,
+    input  wire [15:0] dbg_ic,
+    input  wire [15:0] dbg_enc
 );
 
 // =============================================================================
@@ -89,7 +91,7 @@ localparam ERR_BAD_LEN     = 8'h02;
 localparam ERR_UNKNOWN_CMD = 8'h03;
 
 // ---- TX buffer (holds SYNC + CMD + LEN + PAYLOAD, CRC computed on-the-fly) --
-localparam TX_BUF_SIZE = 21;   // max: 1 sync + 1 cmd + 1 len + 17 payload + 1 unused
+localparam TX_BUF_SIZE = 25;   // max: 1 sync + 1 cmd + 1 len + 21 payload + 1 unused
 
 // =============================================================================
 // RX state machine
@@ -199,7 +201,7 @@ always @(posedge clk or negedge rst_n) begin : main_seq
         // -- FOC control outputs ----------------------------------------------
         enable        <= 1'b0;
         mode          <= 8'h00;
-        cmd_iq_ref    <= 16'sd0;
+        cmd_iq_ref    <= 16'sd2000;  // default torque limit for speed/position modes
         cmd_speed_ref <= 16'sd0;
         cmd_pos_ref   <= 16'h0000;
 
@@ -208,9 +210,9 @@ always @(posedge clk or negedge rst_n) begin : main_seq
         ki_id    <= 16'sd16;
         kp_iq    <= 16'sd128;
         ki_iq    <= 16'sd16;
-        kp_speed <= 16'sd64;
-        ki_speed <= 16'sd4;
-        kp_pos   <= 16'sd32;
+        kp_speed <= 16'sd1024;
+        ki_speed <= 16'sd128;
+        kp_pos   <= 16'sd512;
 
         // -- Clear buffers ----------------------------------------------------
         for (i = 0; i < MAX_PAYLOAD; i = i + 1)
@@ -457,25 +459,29 @@ always @(posedge clk or negedge rst_n) begin : main_seq
                     CMD_GET_STATUS: begin
                         tx_buf[0]  <= SYNC_BYTE;
                         tx_buf[1]  <= RSP_STATUS;
-                        tx_buf[2]  <= 8'h11;
+                        tx_buf[2]  <= 8'h15;       // 21 bytes payload
                         tx_buf[3]  <= mode;
                         tx_buf[4]  <= {7'h00, enable};
                         tx_buf[5]  <= {7'h00, foc_fault};
-                        tx_buf[6]  <= dbg_pos[7:0];
-                        tx_buf[7]  <= dbg_pos[15:8];
-                        tx_buf[8]  <= dbg_speed[7:0];
-                        tx_buf[9]  <= dbg_speed[15:8];
-                        tx_buf[10] <= dbg_id[7:0];
-                        tx_buf[11] <= dbg_id[15:8];
-                        tx_buf[12] <= dbg_iq[7:0];
-                        tx_buf[13] <= dbg_iq[15:8];
-                        tx_buf[14] <= dbg_pwm_a[7:0];
-                        tx_buf[15] <= dbg_pwm_a[15:8];
-                        tx_buf[16] <= dbg_pwm_b[7:0];
-                        tx_buf[17] <= dbg_pwm_b[15:8];
-                        tx_buf[18] <= dbg_pwm_c[7:0];
-                        tx_buf[19] <= dbg_pwm_c[15:8];
-                        tx_data_len <= 5'd20;
+                        tx_buf[6]  <= drv_fault_reg[7:0];
+                        tx_buf[7]  <= {5'h00, drv_fault_reg[10:8]};
+                        tx_buf[8]  <= dbg_pos[7:0];
+                        tx_buf[9]  <= dbg_pos[15:8];
+                        tx_buf[10] <= dbg_speed[7:0];
+                        tx_buf[11] <= dbg_speed[15:8];
+                        tx_buf[12] <= dbg_id[7:0];
+                        tx_buf[13] <= dbg_id[15:8];
+                        tx_buf[14] <= dbg_iq[7:0];
+                        tx_buf[15] <= dbg_iq[15:8];
+                        tx_buf[16] <= dbg_ia[7:0];
+                        tx_buf[17] <= dbg_ia[15:8];
+                        tx_buf[18] <= dbg_ib[7:0];
+                        tx_buf[19] <= dbg_ib[15:8];
+                        tx_buf[20] <= dbg_ic[7:0];
+                        tx_buf[21] <= dbg_ic[15:8];
+                        tx_buf[22] <= dbg_enc[7:0];
+                        tx_buf[23] <= dbg_enc[15:8];
+                        tx_data_len <= 5'd24;
                         tx_trigger  <= 1'b1;
                     end
 
@@ -516,16 +522,16 @@ always @(posedge clk or negedge rst_n) begin : main_seq
                     CMD_RESET: begin
                         enable        <= 1'b0;
                         mode          <= 8'h00;
-                        cmd_iq_ref    <= 16'sd0;
+                        cmd_iq_ref    <= 16'sd2000;
                         cmd_speed_ref <= 16'sd0;
                         cmd_pos_ref   <= 16'h0000;
                         kp_id         <= 16'sd128;
                         ki_id         <= 16'sd16;
                         kp_iq         <= 16'sd128;
                         ki_iq         <= 16'sd16;
-                        kp_speed      <= 16'sd64;
-                        ki_speed      <= 16'sd4;
-                        kp_pos        <= 16'sd32;
+                        kp_speed      <= 16'sd1024;
+                        ki_speed      <= 16'sd128;
+                        kp_pos        <= 16'sd512;
                         stream_active <= 1'b0;
                         ms_cnt        <= 8'd0;
                         tx_buf[0] <= SYNC_BYTE;
@@ -556,25 +562,29 @@ always @(posedge clk or negedge rst_n) begin : main_seq
         if (stream_trigger && (tx_state == TX_IDLE) && !tx_trigger) begin
             tx_buf[0]  <= SYNC_BYTE;
             tx_buf[1]  <= RSP_STATUS;
-            tx_buf[2]  <= 8'h11;
+            tx_buf[2]  <= 8'h15;       // 21 bytes payload
             tx_buf[3]  <= mode;
             tx_buf[4]  <= {7'h00, enable};
             tx_buf[5]  <= {7'h00, foc_fault};
-            tx_buf[6]  <= dbg_pos[7:0];
-            tx_buf[7]  <= dbg_pos[15:8];
-            tx_buf[8]  <= dbg_speed[7:0];
-            tx_buf[9]  <= dbg_speed[15:8];
-            tx_buf[10] <= dbg_id[7:0];
-            tx_buf[11] <= dbg_id[15:8];
-            tx_buf[12] <= dbg_iq[7:0];
-            tx_buf[13] <= dbg_iq[15:8];
-            tx_buf[14] <= dbg_pwm_a[7:0];
-            tx_buf[15] <= dbg_pwm_a[15:8];
-            tx_buf[16] <= dbg_pwm_b[7:0];
-            tx_buf[17] <= dbg_pwm_b[15:8];
-            tx_buf[18] <= dbg_pwm_c[7:0];
-            tx_buf[19] <= dbg_pwm_c[15:8];
-            tx_data_len <= 5'd20;
+            tx_buf[6]  <= drv_fault_reg[7:0];
+            tx_buf[7]  <= {5'h00, drv_fault_reg[10:8]};
+            tx_buf[8]  <= dbg_pos[7:0];
+            tx_buf[9]  <= dbg_pos[15:8];
+            tx_buf[10] <= dbg_speed[7:0];
+            tx_buf[11] <= dbg_speed[15:8];
+            tx_buf[12] <= dbg_id[7:0];
+            tx_buf[13] <= dbg_id[15:8];
+            tx_buf[14] <= dbg_iq[7:0];
+            tx_buf[15] <= dbg_iq[15:8];
+            tx_buf[16] <= dbg_ia[7:0];
+            tx_buf[17] <= dbg_ia[15:8];
+            tx_buf[18] <= dbg_ib[7:0];
+            tx_buf[19] <= dbg_ib[15:8];
+            tx_buf[20] <= dbg_ic[7:0];
+            tx_buf[21] <= dbg_ic[15:8];
+            tx_buf[22] <= dbg_enc[7:0];
+            tx_buf[23] <= dbg_enc[15:8];
+            tx_data_len <= 5'd24;
             tx_trigger  <= 1'b1;
         end
 

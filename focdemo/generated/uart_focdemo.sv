@@ -123,20 +123,14 @@ module uart_focdemo (
                 end
 
                 // ---------------------------------------------------------
-                // STOP: hold stop bit for one baud period, then go idle
+                // STOP: hold stop bit for one baud period, then go idle.
+                // Always transition through TX_IDLE so tx_ready pulses high
+                // for at least one cycle — required by the TX handshake.
                 // ---------------------------------------------------------
                 TX_STOP: begin
                     if (tx_baud_cnt == {9{1'b0}}) begin
                         tx_ready_reg <= 1'b1;
                         tx_state     <= TX_IDLE;
-                        // If another byte is already waiting, accept it immediately
-                        if (tx_valid) begin
-                            tx_shift    <= tx_data;
-                            tx_baud_cnt <= BAUD_DIV[8:0] - 1'b1;
-                            tx_reg      <= 1'b0;
-                            tx_ready_reg <= 1'b0;
-                            tx_state    <= TX_START;
-                        end
                     end else begin
                         tx_baud_cnt <= tx_baud_cnt - 1'b1;
                     end
