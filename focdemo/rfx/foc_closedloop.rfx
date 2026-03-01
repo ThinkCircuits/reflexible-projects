@@ -76,8 +76,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
           speed_integrator: i32 = 0,  // Speed PI integrator
           last_encoder:     u16 = 0,  // Encoder reading from previous cycle
           position:         u16 = 0,  // Tracked position (mirrors encoder_raw)
-          speed_est:        i16 = 0,  // Estimated speed (encoder counts/cycle, signed)
-          fault_latch:      bool = false,  // Latching overcurrent fault flag
+          speed_acc:        i32 = 0,  // EMA speed accumulator (counts per 64 FOC cycles)
           ia_offset:        u16 = 2048,  // Phase A zero-current ADC offset
           ib_offset:        u16 = 2048,  // Phase B zero-current ADC offset
           ic_offset:        u16 = 2048   // Phase C zero-current ADC offset
@@ -111,8 +110,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       speed_integrator in -2147483648..2147483647,
       last_encoder     in 0..4095,
       position         in 0..4095,
-      speed_est        in -32768..32767,
-      fault_latch      in { true, false },
+      speed_acc        in -2147483648..2147483647,
       ia_offset        in 0..4095,
       ib_offset        in 0..4095,
       ic_offset        in 0..4095
@@ -135,9 +133,8 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     }
 
     require: {
-      // When disabled or faulted the inverter must coast (50 % duty)
-      (!enable) -> ((pwm_a == 512) && (pwm_b == 512) && (pwm_c == 512)),
-      fault     -> ((pwm_a == 512) && (pwm_b == 512) && (pwm_c == 512))
+      // When disabled the inverter must coast (50 % duty)
+      (!enable) -> ((pwm_a == 512) && (pwm_b == 512) && (pwm_c == 512))
     }
   }
 
@@ -171,15 +168,24 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // ================================================================
     // STEP 2 – Speed and position estimation
     // ================================================================
-    // Simple backward-difference speed estimator (encoder counts per cycle).
-    // Cast through i32 to handle wrap-around safely before clamping.
-    let raw_speed: i32 = (encoder_raw - last_encoder)
-    speed_est     = clamp(i32_to_i16(raw_speed), -4095, 4095)
+    // EMA speed estimator: speed_acc = speed_acc + delta - decay
+    // Steady-state speed_acc ≈ delta * 64, giving 6 extra bits of precision.
+    // TUI converts to counts/s: counts_per_s = speed_acc * foc_rate / 64
+    // Decay uses ceiling-away-from-zero division to avoid the dead zone where
+    // |speed_acc| < 64 would truncate to 0 and never settle.
+    let delta: i32 = (encoder_raw - last_encoder)
+    if (speed_acc > 0) {
+      speed_acc = speed_acc + delta - ((speed_acc + 63) / 64)
+    } elif (speed_acc < 0) {
+      speed_acc = speed_acc + delta - ((speed_acc - 63) / 64)
+    } else {
+      speed_acc = delta
+    }
     position      = encoder_raw
     last_encoder  = encoder_raw
 
     // Expose observer outputs for debugging
-    dbg_speed = speed_est
+    dbg_speed = clamp(i32_to_i16(speed_acc), -32768, 32767)
     dbg_pos   = position
 
     // ================================================================
@@ -233,27 +239,13 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     dbg_id = id_meas
     dbg_iq = iq_meas
 
-    // ================================================================
-    // STEP 6 – Overcurrent fault detection (latching via state)
-    // Fault if either axis current exceeds +-1800 (in ADC-scaled units)
-    // ================================================================
-    let abs_id: i16 = abs(id_meas)
-    let abs_iq: i16 = abs(iq_meas)
-    if ((abs_id > 1800) || (abs_iq > 1800)) {
-      //fault_latch = true
-    }
-    // Clear fault latch only when the drive is explicitly disabled
-    if (!enable) {
-      fault_latch = false
-    }
-
-    // Always assign the output from the latch (satisfies all-path assignment)
-    fault = fault_latch
+    // Fault detection disabled — DRV8323 hardware OCP handles protection
+    fault = false
 
     // ================================================================
     // STEP 7 – Coast if disabled or faulted
     // ================================================================
-    if ((!enable) || fault_latch) {
+    if (!enable) {
       pwm_a = 512
       pwm_b = 512
       pwm_c = 512
@@ -275,7 +267,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
         speed_ref = clamp(i32_to_i16(speed_cmd), -8192, 8192)
 
         // Speed PI -> iq_ref
-        let spd_error: i16 = clamp(i32_to_i16(speed_ref - speed_est), -8192, 8192)
+        let spd_error: i16 = clamp(i32_to_i16(speed_ref - speed_acc), -8192, 8192)
         speed_integrator = clamp(speed_integrator + spd_error, -524288, 524288)
         let spd_p: i32 = (spd_error * kp_speed) / 256
         let spd_i: i32 = (speed_integrator * ki_speed) / 65536
@@ -284,7 +276,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
       } elif (mode == 1) {
         // ----- Speed mode: speed PI -> iq_ref -----
         speed_ref = cmd_speed_ref
-        let spd_error: i16 = clamp(i32_to_i16(speed_ref - speed_est), -8192, 8192)
+        let spd_error: i16 = clamp(i32_to_i16(speed_ref - speed_acc), -8192, 8192)
         speed_integrator = clamp(speed_integrator + spd_error, -524288, 524288)
         let spd_p: i32 = (spd_error * kp_speed) / 256
         let spd_i: i32 = (speed_integrator * ki_speed) / 65536
@@ -373,7 +365,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // (id_ref = 0, iq_ref = 0, both errors = 0, vd = vq = 0 -> v_alpha = v_beta = 0)
     test zero_command_enabled
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
-               last_encoder = 0, position = 0, speed_est = 0,
+               last_encoder = 0, position = 0, speed_acc = 0,
                ia_offset = 2048, ib_offset = 2048, ic_offset = 2048 },
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
@@ -389,7 +381,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // ia_raw = 3900 -> ia = 1852; with cos(0)~32767, sin(0)~0: id ~ 1852 > 1800 -> fault
     test fault_on_overcurrent
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
-               last_encoder = 0, position = 0, speed_est = 0,
+               last_encoder = 0, position = 0, speed_acc = 0,
                ia_offset = 2048, ib_offset = 2048, ic_offset = 2048 },
       inputs: {
         ia_raw = 3900, ib_raw = 2048, ic_raw = 2048,
@@ -405,7 +397,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // (fault latch resets when enable = false)
     test fault_clears_on_disable
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
-               last_encoder = 0, position = 0, speed_est = 0,
+               last_encoder = 0, position = 0, speed_acc = 0,
                ia_offset = 2048, ib_offset = 2048, ic_offset = 2048 },
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
@@ -420,7 +412,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // Test 5 – Speed mode: zero speed error with zero current yields coast
     test speed_mode_idle
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
-               last_encoder = 100, position = 100, speed_est = 0 },
+               last_encoder = 100, position = 100, speed_acc = 0 },
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 100,
@@ -434,7 +426,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // Test 6 – Position mode: zero position error yields coast
     test position_mode_at_target
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
-               last_encoder = 200, position = 200, speed_est = 0 },
+               last_encoder = 200, position = 200, speed_acc = 0 },
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,
         encoder_raw = 200,
@@ -448,7 +440,7 @@ reflex foc_closedloop @(rate(10000Hz), wcet(50us), stack(512bytes), bounded, hdl
     // Test 7 – theta_elec tracks encoder_raw * 16
     test theta_elec_from_encoder
       state: { id_integrator = 0, iq_integrator = 0, speed_integrator = 0,
-               last_encoder = 0, position = 0, speed_est = 0,
+               last_encoder = 0, position = 0, speed_acc = 0,
                ia_offset = 2048, ib_offset = 2048, ic_offset = 2048 },
       inputs: {
         ia_raw = 2048, ib_raw = 2048, ic_raw = 2048,

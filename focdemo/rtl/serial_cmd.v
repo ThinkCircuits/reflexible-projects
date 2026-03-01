@@ -61,6 +61,13 @@ module serial_cmd (
 );
 
 // =============================================================================
+// Firmware variant (set via -DFIRMWARE_VARIANT=N in yosys read_verilog)
+// =============================================================================
+`ifndef FIRMWARE_VARIANT
+`define FIRMWARE_VARIANT 8'd2   // default: position (all features)
+`endif
+
+// =============================================================================
 // Parameters
 // =============================================================================
 
@@ -91,7 +98,7 @@ localparam ERR_BAD_LEN     = 8'h02;
 localparam ERR_UNKNOWN_CMD = 8'h03;
 
 // ---- TX buffer (holds SYNC + CMD + LEN + PAYLOAD, CRC computed on-the-fly) --
-localparam TX_BUF_SIZE = 25;   // max: 1 sync + 1 cmd + 1 len + 21 payload + 1 unused
+localparam TX_BUF_SIZE = 26;   // max: 1 sync + 1 cmd + 1 len + 22 payload
 
 // =============================================================================
 // RX state machine
@@ -459,7 +466,7 @@ always @(posedge clk or negedge rst_n) begin : main_seq
                     CMD_GET_STATUS: begin
                         tx_buf[0]  <= SYNC_BYTE;
                         tx_buf[1]  <= RSP_STATUS;
-                        tx_buf[2]  <= 8'h15;       // 21 bytes payload
+                        tx_buf[2]  <= 8'h16;       // 22 bytes payload
                         tx_buf[3]  <= mode;
                         tx_buf[4]  <= {7'h00, enable};
                         tx_buf[5]  <= {7'h00, foc_fault};
@@ -481,7 +488,8 @@ always @(posedge clk or negedge rst_n) begin : main_seq
                         tx_buf[21] <= dbg_ic[15:8];
                         tx_buf[22] <= dbg_enc[7:0];
                         tx_buf[23] <= dbg_enc[15:8];
-                        tx_data_len <= 5'd24;
+                        tx_buf[24] <= `FIRMWARE_VARIANT;
+                        tx_data_len <= 5'd25;
                         tx_trigger  <= 1'b1;
                     end
 
@@ -562,7 +570,7 @@ always @(posedge clk or negedge rst_n) begin : main_seq
         if (stream_trigger && (tx_state == TX_IDLE) && !tx_trigger) begin
             tx_buf[0]  <= SYNC_BYTE;
             tx_buf[1]  <= RSP_STATUS;
-            tx_buf[2]  <= 8'h15;       // 21 bytes payload
+            tx_buf[2]  <= 8'h16;       // 22 bytes payload
             tx_buf[3]  <= mode;
             tx_buf[4]  <= {7'h00, enable};
             tx_buf[5]  <= {7'h00, foc_fault};
@@ -584,7 +592,8 @@ always @(posedge clk or negedge rst_n) begin : main_seq
             tx_buf[21] <= dbg_ic[15:8];
             tx_buf[22] <= dbg_enc[7:0];
             tx_buf[23] <= dbg_enc[15:8];
-            tx_data_len <= 5'd24;
+            tx_buf[24] <= `FIRMWARE_VARIANT;
+            tx_data_len <= 5'd25;
             tx_trigger  <= 1'b1;
         end
 

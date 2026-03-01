@@ -42,6 +42,15 @@ CMD_NACK   = 0x81
 CMD_STATUS = 0x90
 
 MODE_NAMES = {0: "TORQUE", 1: "SPEED", 2: "POSITION"}
+VARIANT_NAMES = {0: "torque", 1: "speed", 2: "position"}
+VARIANT_MAX_MODE = {0: 0, 1: 1, 2: 2}  # max mode supported by each variant
+
+# Speed scaling: FPGA EMA accumulator = delta * 64 (shift=6).
+# To convert FPGA units to counts/s: multiply by FOC_RATE / 64.
+# FOC rate ≈ 20 kHz (ADC sample period 2400 clks @ 48 MHz).
+SPEED_EMA_SHIFT = 6
+FOC_RATE_HZ = 20000
+SPEED_SCALE = FOC_RATE_HZ / (1 << SPEED_EMA_SHIFT)  # ~312.5 cnt/s per unit
 
 
 # =============================================================================
@@ -95,6 +104,8 @@ def parse_status_payload(payload: bytes) -> dict:
     if len(payload) >= 21:
         ia, ib, ic, enc = struct.unpack_from("<HHHH", payload, 13)
         result.update({"ia": ia, "ib": ib, "ic": ic, "enc": enc})
+    if len(payload) >= 22:
+        result["firmware_variant"] = payload[21]
     return result
 
 
@@ -282,8 +293,8 @@ def tui_main(stdscr, foc: FocSerial, args):
     gains = {
         "id":    [0, 128, 16],
         "iq":    [1, 128, 16],
-        "speed": [2, 64,  4],
-        "pos":   [3, 32,  0],
+        "speed": [2, 1024, 128],
+        "pos":   [3, 512,  0],
     }
 
     while True:
@@ -311,9 +322,12 @@ def tui_main(stdscr, foc: FocSerial, args):
 
         conn_str = "Connected" if foc.connected else "DISCONNECTED"
         fault_str = "FAULT" if st.get("fault", 0) else "None"
+        fw_variant = st.get("firmware_variant", 2)  # default to position if unknown
+        fw_name = VARIANT_NAMES.get(fw_variant, f"v{fw_variant}")
+        max_mode = VARIANT_MAX_MODE.get(fw_variant, 2)
 
         # Header
-        title = f" FOC Demo Controller "
+        title = f" FOC Demo Controller ({fw_name}) "
         stdscr.addstr(0, 0, "+" + "-" * (w - 2) + "+")
         stdscr.addstr(0, (w - len(title)) // 2, title, curses.A_BOLD)
         row = 1
@@ -344,7 +358,7 @@ def tui_main(stdscr, foc: FocSerial, args):
             edit_label = {'t': 'Torque', 's': 'Speed', 'p': 'Position'}.get(editing_cmd, 'Target')
             target_line = f" {edit_label}: {target_buf}_"
         else:
-            unit = {0: "", 1: " cnt/s", 2: " counts"}.get(local_mode, "")
+            unit = {0: "", 1: " cnt/s (EMA)", 2: " counts"}.get(local_mode, "")
             target_line = f" Target: {local_target}{unit}"
         stdscr.addstr(row, 0, "|" + target_line.ljust(w - 2) + "|")
         row += 1
@@ -354,8 +368,9 @@ def tui_main(stdscr, foc: FocSerial, args):
         row += 1
 
         pos_val = st.get("pos", 0)
-        spd_val = st.get("speed", 0)
-        tel1 = f" Position: {pos_val:6d}    Speed: {spd_val:6d} cnt/s"
+        spd_raw = st.get("speed", 0)
+        spd_val = spd_raw * SPEED_SCALE
+        tel1 = f" Position: {pos_val:6d}    Speed: {spd_val:8.0f} cnt/s"
         stdscr.addstr(row, 0, "|" + tel1.ljust(w - 2) + "|")
         row += 1
 
@@ -400,7 +415,13 @@ def tui_main(stdscr, foc: FocSerial, args):
         # Keys section
         stdscr.addstr(row, 0, "+" + "- Keys " + "-" * (w - 9) + "+")
         row += 1
-        keys = " e:enable  m:mode  t:torque  s:speed  p:pos  g:gains  r:reset  q:quit"
+        keys_parts = [" e:enable", "t:torque"]
+        if max_mode >= 1:
+            keys_parts.append("s:speed")
+        if max_mode >= 2:
+            keys_parts.append("p:pos")
+        keys_parts.extend(["g:gains", "r:reset", "q:quit"])
+        keys = "  ".join(keys_parts)
         stdscr.addstr(row, 0, "|" + keys.ljust(w - 2) + "|")
         row += 1
         stdscr.addstr(row, 0, "+" + "-" * (w - 2) + "+")
@@ -424,7 +445,8 @@ def tui_main(stdscr, foc: FocSerial, args):
                 if editing_cmd == 't':
                     foc.set_torque(local_target)
                 elif editing_cmd == 's':
-                    foc.set_speed(local_target)
+                    # Convert counts/s to FPGA EMA units
+                    foc.set_speed(int(local_target / SPEED_SCALE))
                 elif editing_cmd == 'p':
                     foc.set_position(local_target & 0xFFFF)
             elif key == 27:  # Escape
@@ -442,20 +464,20 @@ def tui_main(stdscr, foc: FocSerial, args):
             local_enable = not local_enable
             foc.set_enable(local_enable)
         elif key == ord("m"):
-            local_mode = (local_mode + 1) % 3
+            local_mode = (local_mode + 1) % (max_mode + 1)
             foc.set_mode(local_mode)
         elif key == ord("t"):
             # Set torque value: direct iq_ref in torque mode, torque limit in speed/position mode
             editing_target = True
             editing_cmd = 't'
             target_buf = ""
-        elif key == ord("s"):
+        elif key == ord("s") and max_mode >= 1:
             local_mode = 1
             foc.set_mode(1)
             editing_target = True
             editing_cmd = 's'
             target_buf = ""
-        elif key == ord("p"):
+        elif key == ord("p") and max_mode >= 2:
             local_mode = 2
             foc.set_mode(2)
             editing_target = True

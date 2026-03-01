@@ -63,9 +63,9 @@ UART_PARAMS  := instance_name=uart_focdemo baud_rate=115200 \
 # =============================================================================
 # Default target
 # =============================================================================
-.PHONY: all generate program lint timing clean simple simple-program openloop openloop-program debug debug-program debug-lint
+.PHONY: all generate program lint timing clean simple simple-program openloop openloop-program debug debug-program debug-lint position position-program torque torque-program speed speed-program
 
-all: $(BUILD_DIR)/$(PROJECT).bin
+all: position
 
 # =============================================================================
 # Generate derived sources
@@ -111,10 +111,18 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 # =============================================================================
+# Position variant (default — all three modes)
+# =============================================================================
+position: $(BUILD_DIR)/$(PROJECT).bin
+
+position-program: $(BUILD_DIR)/$(PROJECT).bin
+	$(ICEPROG) $<
+
+# =============================================================================
 # Synthesis (Yosys)
 # =============================================================================
 $(BUILD_DIR)/$(PROJECT).json: $(ALL_SOURCES) | $(BUILD_DIR)
-	$(YOSYS) -p "read_verilog -sv $(ALL_SOURCES); synth_ice40 -top focdemo_top -dsp -json $@"
+	$(YOSYS) -p "read_verilog -sv -DFIRMWARE_VARIANT=2 $(ALL_SOURCES); synth_ice40 -top focdemo_top -dsp -json $@"
 
 # =============================================================================
 # Place and Route (nextpnr)
@@ -315,7 +323,119 @@ debug-lint: $(DEBUG_GEN_SOURCES)
 	    rtl/ice40_cells_stub.v $(DEBUG_ALL_SOURCES)
 
 # =============================================================================
+# Torque-only FOC — Current loops only, no speed/position (smallest)
+# =============================================================================
+TORQUE_BUILD_DIR := build_torque
+TORQUE_GEN_DIR   := $(TORQUE_BUILD_DIR)/generated
+
+TORQUE_GEN_SOURCES := \
+    $(TORQUE_GEN_DIR)/foc_closedloop.sv \
+    $(TORQUE_GEN_DIR)/fp_trig_bram.sv \
+    $(GEN_DIR)/adc_4ch.sv \
+    $(GEN_DIR)/pwm_3ph.sv \
+    $(GEN_DIR)/uart_focdemo.sv
+
+TORQUE_ALL_SOURCES := $(RTL_SOURCES) $(TORQUE_GEN_SOURCES)
+
+torque: $(TORQUE_BUILD_DIR)/$(PROJECT).bin
+
+$(TORQUE_BUILD_DIR):
+	mkdir -p $(TORQUE_BUILD_DIR)
+
+$(TORQUE_GEN_DIR):
+	mkdir -p $(TORQUE_GEN_DIR)
+
+$(TORQUE_GEN_DIR)/foc_closedloop.sv $(TORQUE_GEN_DIR)/fp_trig_bram.sv: rfx/foc_torque.rfx | $(TORQUE_GEN_DIR)
+	$(REFLEXC) --emit-verilog --verilog-fixed-point -o $(TORQUE_GEN_DIR)/_rfx_out $<
+	cp $(TORQUE_GEN_DIR)/_rfx_out/foc_closedloop.sv $(TORQUE_GEN_DIR)/foc_closedloop.sv
+	sed -i 's/^`timescale/\/\/ `timescale/' $(TORQUE_GEN_DIR)/foc_closedloop.sv
+	@if [ -f $(TORQUE_GEN_DIR)/_rfx_out/fp_trig_bram.sv ]; then \
+		cp $(TORQUE_GEN_DIR)/_rfx_out/fp_trig_bram.sv $(TORQUE_GEN_DIR)/fp_trig_bram.sv; \
+		sed -i 's/^`timescale/\/\/ `timescale/' $(TORQUE_GEN_DIR)/fp_trig_bram.sv; \
+	fi
+	@if [ -f $(TORQUE_GEN_DIR)/_rfx_out/sin_lut.hex ]; then \
+		cp $(TORQUE_GEN_DIR)/_rfx_out/sin_lut.hex $(TORQUE_GEN_DIR)/sin_lut.hex; \
+	fi
+	@if [ -f $(TORQUE_GEN_DIR)/_rfx_out/cos_lut.hex ]; then \
+		cp $(TORQUE_GEN_DIR)/_rfx_out/cos_lut.hex $(TORQUE_GEN_DIR)/cos_lut.hex; \
+	fi
+
+$(TORQUE_BUILD_DIR)/$(PROJECT).json: $(TORQUE_ALL_SOURCES) | $(TORQUE_BUILD_DIR)
+	$(YOSYS) -p "read_verilog -sv -DFIRMWARE_VARIANT=0 $(TORQUE_ALL_SOURCES); synth_ice40 -top focdemo_top -dsp -json $@"
+
+$(TORQUE_BUILD_DIR)/$(PROJECT).asc: $(TORQUE_BUILD_DIR)/$(PROJECT).json $(PCF)
+	$(NEXTPNR) --$(DEVICE) --package $(PACKAGE) \
+	    --pcf $(PCF) \
+	    --json $< \
+	    --asc $@ \
+	    --freq $(FREQ_MHZ) \
+	    --timing-allow-fail \
+	    --seed 2
+
+$(TORQUE_BUILD_DIR)/$(PROJECT).bin: $(TORQUE_BUILD_DIR)/$(PROJECT).asc
+	$(ICEPACK) $< $@
+
+torque-program: $(TORQUE_BUILD_DIR)/$(PROJECT).bin
+	$(ICEPROG) $<
+
+# =============================================================================
+# Speed FOC — Torque + speed modes, no position (medium)
+# =============================================================================
+SPEED_BUILD_DIR := build_speed
+SPEED_GEN_DIR   := $(SPEED_BUILD_DIR)/generated
+
+SPEED_GEN_SOURCES := \
+    $(SPEED_GEN_DIR)/foc_closedloop.sv \
+    $(SPEED_GEN_DIR)/fp_trig_bram.sv \
+    $(GEN_DIR)/adc_4ch.sv \
+    $(GEN_DIR)/pwm_3ph.sv \
+    $(GEN_DIR)/uart_focdemo.sv
+
+SPEED_ALL_SOURCES := $(RTL_SOURCES) $(SPEED_GEN_SOURCES)
+
+speed: $(SPEED_BUILD_DIR)/$(PROJECT).bin
+
+$(SPEED_BUILD_DIR):
+	mkdir -p $(SPEED_BUILD_DIR)
+
+$(SPEED_GEN_DIR):
+	mkdir -p $(SPEED_GEN_DIR)
+
+$(SPEED_GEN_DIR)/foc_closedloop.sv $(SPEED_GEN_DIR)/fp_trig_bram.sv: rfx/foc_speed.rfx | $(SPEED_GEN_DIR)
+	$(REFLEXC) --emit-verilog --verilog-fixed-point -o $(SPEED_GEN_DIR)/_rfx_out $<
+	cp $(SPEED_GEN_DIR)/_rfx_out/foc_closedloop.sv $(SPEED_GEN_DIR)/foc_closedloop.sv
+	sed -i 's/^`timescale/\/\/ `timescale/' $(SPEED_GEN_DIR)/foc_closedloop.sv
+	@if [ -f $(SPEED_GEN_DIR)/_rfx_out/fp_trig_bram.sv ]; then \
+		cp $(SPEED_GEN_DIR)/_rfx_out/fp_trig_bram.sv $(SPEED_GEN_DIR)/fp_trig_bram.sv; \
+		sed -i 's/^`timescale/\/\/ `timescale/' $(SPEED_GEN_DIR)/fp_trig_bram.sv; \
+	fi
+	@if [ -f $(SPEED_GEN_DIR)/_rfx_out/sin_lut.hex ]; then \
+		cp $(SPEED_GEN_DIR)/_rfx_out/sin_lut.hex $(SPEED_GEN_DIR)/sin_lut.hex; \
+	fi
+	@if [ -f $(SPEED_GEN_DIR)/_rfx_out/cos_lut.hex ]; then \
+		cp $(SPEED_GEN_DIR)/_rfx_out/cos_lut.hex $(SPEED_GEN_DIR)/cos_lut.hex; \
+	fi
+
+$(SPEED_BUILD_DIR)/$(PROJECT).json: $(SPEED_ALL_SOURCES) | $(SPEED_BUILD_DIR)
+	$(YOSYS) -p "read_verilog -sv -DFIRMWARE_VARIANT=1 $(SPEED_ALL_SOURCES); synth_ice40 -top focdemo_top -dsp -json $@"
+
+$(SPEED_BUILD_DIR)/$(PROJECT).asc: $(SPEED_BUILD_DIR)/$(PROJECT).json $(PCF)
+	$(NEXTPNR) --$(DEVICE) --package $(PACKAGE) \
+	    --pcf $(PCF) \
+	    --json $< \
+	    --asc $@ \
+	    --freq $(FREQ_MHZ) \
+	    --timing-allow-fail \
+	    --seed 2
+
+$(SPEED_BUILD_DIR)/$(PROJECT).bin: $(SPEED_BUILD_DIR)/$(PROJECT).asc
+	$(ICEPACK) $< $@
+
+speed-program: $(SPEED_BUILD_DIR)/$(PROJECT).bin
+	$(ICEPROG) $<
+
+# =============================================================================
 # Clean
 # =============================================================================
 clean:
-	rm -rf $(BUILD_DIR) $(DEBUG_BUILD_DIR) $(SIMPLE_BUILD_DIR) $(OPENLOOP_BUILD_DIR) $(GEN_DIR)
+	rm -rf $(BUILD_DIR) $(DEBUG_BUILD_DIR) $(SIMPLE_BUILD_DIR) $(OPENLOOP_BUILD_DIR) $(TORQUE_BUILD_DIR) $(SPEED_BUILD_DIR) $(GEN_DIR)
