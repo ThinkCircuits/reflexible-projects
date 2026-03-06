@@ -1,0 +1,34 @@
+# FOC Demo Pin Constraints — iCE40 UltraPlus SG48 (ICE40UP5K-B-EVN)
+# Pad names from hwsetup.md mapped to SG48 pin numbers via litex board definition
+
+# Clock
+set_io clk_12mhz   35      # On-board 12 MHz oscillator
+# rst_n tied high internally (no external reset button)
+
+# ADC SPI bus (shared CS/SCLK, per-channel SDATA)
+set_io adc_sclk    15      # SPI.SCK = AD1.CLK = AD2.CLK
+set_io adc_cs      16      # SPI.SS  = AD1.SS  = AD2.SS
+set_io adc_d0      25      # 36B = AD1.D0 = ISENB
+set_io adc_d1      23      # 37A = AD1.D1 = ISENC
+set_io adc_d2      27      # 38B = AD2.D0 = ISENA
+set_io adc_d3      26      # 39A = AD2.D1 = AS5600.OUT
+
+# Motor PWM outputs (DRV8323RX half-bridge inputs)
+set_io pwm_ah      12      # 22A = INHA
+set_io pwm_al      21      # 23B = INLA
+set_io pwm_bh      13      # 24A = INHB
+set_io pwm_bl      20      # 25B = INLB
+set_io pwm_ch      19      # 29B = INHC
+set_io pwm_cl      18      # 31B = INLC
+
+# DRV8323RX SPI configuration interface
+set_io drv_sdi     11      # 20A = SDI
+set_io drv_sdo     10      # 18A = SDO
+set_io drv_ncs      9      # 16A = nSCS
+set_io drv_sclk     6      # 13B = SCLK
+
+# UART (external FTDI cable)
+set_io uart_tx     34      # 44B → FTDI RXD
+set_io uart_rx     31      # 42B ← FTDI TXD
+
+# Status LEDs — driven via SB_RGBA_DRV hard IP (no PCF pins needed)
